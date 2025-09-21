@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 class FiniteOptiDICE(nn.Module):
     """
-    Finite-horizon OptiDICE (time-dependent ν), ν(s,H)=0.
+    Finite-horizon (time-dependent ν), ν(s,H)=0.
     """
     def __init__(self, config, device="cuda"):
         super().__init__()
@@ -102,8 +102,7 @@ class FiniteOptiDICE(nn.Module):
         loss_term = (state_action_ratio * e - self.alpha * f(state_action_ratio, self.f_div)).mean()
         nu_loss = loss_term + gp_coeff * nu_grad_penalty + init_term
 
-        return nu_loss, (e.detach(), state_action_ratio.detach(), 
-                         nu_grad_penalty.detach(), init_term.detach(), 
+        return nu_loss, (e.detach(), nu_grad_penalty.detach(), init_term.detach(), 
                          loss_term.detach(), nu_vals.mean().detach(),
                          next_nu.mean().detach())
 
@@ -137,7 +136,7 @@ class FiniteOptiDICE(nn.Module):
 
         # ---- Update ν ----
         self.nu_optim.zero_grad()
-        nu_loss, (e, w_star, nu_grad_penalty, init_term, loss_term, nu_vals_mean, next_nu_mean) = self.nu_loss_fn(
+        nu_loss, (e, nu_grad_penalty, init_term, loss_term, nu_vals_mean, next_nu_mean) = self.nu_loss_fn(
             states, next_states, timesteps, next_timesteps, rewards, initial_states
         )
         nu_loss.backward()
@@ -166,10 +165,6 @@ class FiniteOptiDICE(nn.Module):
             "e_std": float(e.std().item()),
             "e_min": float(e.min().item()),
             "e_max": float(e.max().item()),
-            "w_star_mean": float(w_star.mean().item()),
-            "w_star_std": float(w_star.std().item()),
-            "w_star_min": float(w_star.min().item()),
-            "w_star_max": float(w_star.max().item()),
             "nu_grad_penalty": float(nu_grad_penalty.item()) if isinstance(nu_grad_penalty, torch.Tensor) else 0.0,
             "init_term": float(init_term.item()),
             "loss_term": float(loss_term.item()),

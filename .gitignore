@@ -4,3 +4,5 @@ taxi_q_tables_V2
 miscellaneous
 FairMORL/*.ipynb
 taxi_q_tables_V1
+checkpoints/
+wandb/

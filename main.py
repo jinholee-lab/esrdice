@@ -1,6 +1,8 @@
 
 
 import argparse
+import json
+import os
 import numpy as np
 import torch
 
@@ -12,6 +14,8 @@ from finitedice import FiniteOptiDICE
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
 from evaluate import evaluate_policy
 from divergence import FDivergence
+
+import wandb
 
 # ---- import 환경 및 함수 ----
 # from your_module import Fair_Taxi_MDP_Penalty_V2, dataset_to_replaybuffer, FiniteOptiDICE, FDivergence
@@ -211,26 +215,31 @@ def main():
     parser.add_argument("--reward_dim", type=int, default=2)
     parser.add_argument("--utility_kind", type=str, default="piecewise_log")
 
-    # ---- OptiDICE setup ----
+    # ---- Hyperparameter setup ----
     parser.add_argument("--horizon", type=int, default=100)
     parser.add_argument("--alpha", type=float, default=1)
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--time_embed_dim", type=int, default=8)
     parser.add_argument("--layer_norm", type=bool, default=True)
-
     parser.add_argument("--policy_lr", type=float, default=3e-4)
     parser.add_argument("--nu_lr", type=float, default=3e-4)
     parser.add_argument("--f_divergence", type=str, default="Chi",
                         choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
 
+    # ---- path ----
+    parser.add_argument("--save_path", type=str, default="./checkpoints/")
+
     # ---- Dataset / Replay buffer ----
     parser.add_argument("--dataset_path", type=str, default="./data/dataset_v3.npy")
-    parser.add_argument("--reward_index", type=int, default=0)
     parser.add_argument("--one_hot_pass_idx", type=bool, default=True)
     parser.add_argument("--concat_acc_reward", type=bool, default=True)
-    parser.add_argument("--normalization", type=bool, default=False)
     parser.add_argument("--normalization_method", type=str, default="linear", choices=["zscore", "minmax", "linear"])
+
+    # ---- logging ----
+    parser.add_argument("--use_wandb", type=bool, default=False)
+    parser.add_argument("--wandb_project", type=str, default="esrdice")
+    parser.add_argument("--tag", type=str, default="test")
 
     args = parser.parse_args()
 
@@ -298,9 +307,19 @@ def main():
 
     print("✅ Environment and agent initialized.")
     print("Config:", config)
+    
+    # ---- wandb logging ----
+    if config.use_wandb:
+        wandb.init(
+            project=config.wandb_project,
+            config=vars(config),
+            name=f"{config.tag}_seed{config.seed}",
+        )
+    
+        
     # ---- Training loop ----
     def train(agent, buffer, num_steps=10000, batch_size=256, log_interval=100):
-        stats_history = []
+        # stats_history = []
 
         for step in range(1, num_steps + 1):
             batch = buffer.sample(batch_size)
@@ -308,6 +327,7 @@ def main():
             
             if step % log_interval == 0:
                 print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k,v in stats.items()]))
+                
                 eval_results = evaluate_policy(
                     env,
                     agent,
@@ -318,7 +338,32 @@ def main():
                     norm_stats=norm_stats,
                     utility=utility                # ESR 학습에 썼던 Utility
                 )
-            stats_history.append(stats)
+                
+                if config.use_wandb:
+                    wandb.log({"train/" + k: v for k, v in stats.items()}, step=step)
+                    wandb.log({
+                        "eval/linear_scalarized_return": eval_results["linear_scalarized_return"],
+                        f"eval/expected_scalarized_return_{config.utility_kind}": eval_results[f"expected_scalarized_return_{config.utility_kind}"],
+                        f"eval/scalarized_expected_return_{config.utility_kind}": eval_results[f"scalarized_expected_return_{config.utility_kind}"],
+                    }, step=step)
+    
+                    # log the individual dimensions of the expected return vector
+                    expected_return_vector = eval_results["expected_return_vector"]
+                    return_vector_log_data = {
+                        f"eval/expected_return_vector_{i}": val 
+                        for i, val in enumerate(expected_return_vector)
+                    }
+                    wandb.log(return_vector_log_data, step=step)
+                
+                # print(" Train stats:", stats)
+                # print(" Eval stats:", eval_results)
+
+            # stats_history.append(stats)
+
+        # Save final model and stats
+        save_dir = os.path.join(config.save_path, f"{config.tag}_seed{config.seed}")
+        os.makedirs(save_dir, exist_ok=True)
+        agent.save(os.path.join(save_dir, "final_model.pth"))
 
         return stats_history
 
@@ -329,6 +374,9 @@ def main():
         batch_size= config.batch_size,
         log_interval=config.log_interval
     )
+    
+    if config.use_wandb:
+        wandb.finish()
 
     
 if __name__ == "__main__":
