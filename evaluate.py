@@ -5,10 +5,9 @@ def evaluate_policy(
     env,
     agent,
     config,
-    num_episodes=50,
+    num_episodes=10,
     max_steps=100,
-    render=False,
-    normalize=False,
+    normalization_method="linear",
     norm_stats=None,
     utility=None,
 ):
@@ -55,27 +54,27 @@ def evaluate_policy(
                 s_feat = np.concatenate([s_feat, Racc], axis=0)
 
             s_tensor = torch.tensor(s_feat, dtype=torch.float32, device=agent.device).unsqueeze(0)
+            t_tensor = torch.tensor([[step]], dtype=torch.long, device=agent.device)
             # print(s_tensor.shape)
             with torch.no_grad():
-                dist = agent.policy(s_tensor)
+                dist = agent.policy(s_tensor, t_tensor)  # [1, A]
                 action = dist.probs.argmax(dim=-1).item()
 
             next_state, reward_vec, done = env.step(action)
             reward_vec = np.array(reward_vec, dtype=np.float32)
-
-            # --- normalization (if used during training) ---
-            if normalize and norm_stats is not None and "rewards" in norm_stats:
-                stat = norm_stats["rewards"]
-                min_val, max_val = stat["min"], stat["max"]
-                if max_val > min_val:
-                    normalzied_reward_vec = (reward_vec - min_val) / (max_val - min_val)
-
-            # --- update cumulative reward ---
-            Racc += normalzied_reward_vec
             ep_rewards.append(reward_vec)
 
-            if render:
-                env.render()
+            # --- normalization (if used during training) ---
+            if normalization_method == "linear":
+                if norm_stats is None:
+                    raise ValueError("norm_stats must be provided for normalization.")
+                reward_vec = reward_vec / norm_stats["rewards"]["max"]
+            else:
+                # no normalization
+                pass
+
+            # --- update cumulative reward ---
+            Racc += reward_vec
 
             state = next_state
             step += 1
@@ -90,10 +89,11 @@ def evaluate_policy(
             total_scalar = total_vector.sum()  # fallback: 단순합
         returns_all_scalar.append(total_scalar)
 
-        print(f"[Eval Ep {ep+1}] Steps={step}, Vector Return={total_vector}, Scalar={total_scalar}")
-
+        # print(f"[Eval Ep {ep+1}] Steps={step}, Vector Return={total_vector}, Scalar={total_scalar}")
     returns_all_scalar = np.array(returns_all_scalar)
     returns_all_vector = np.array(returns_all_vector)
+    print(f"Avg Vector Return: {returns_all_vector.mean(axis=0)}")
+    print(f"Avg Scalar Return: {returns_all_scalar.mean()}")
 
     results = {
         "avg_scalar_return": returns_all_scalar.mean(),

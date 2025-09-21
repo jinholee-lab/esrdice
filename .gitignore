@@ -1,5 +1,6 @@
 __pycache__/
-*.ipynb
+# *.ipynb
 taxi_q_tables_V2
 miscellaneous
+FairMORL/*.ipynb
 taxi_q_tables_V1

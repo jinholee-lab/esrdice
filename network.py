@@ -35,17 +35,34 @@ class CriticTime(nn.Module):
         return out * (t < self.horizon).float()
 
 
+# class DiscretePolicy(nn.Module):
+#     def __init__(self, state_dim, hidden_dims, action_dim):
+#         super().__init__()
+#         dims = [state_dim] + hidden_dims
+#         layers = []
+#         for i in range(len(dims) - 1):
+#             layers += [nn.Linear(dims[i], dims[i+1]), nn.ReLU()]
+#         self.mlp = nn.Sequential(*layers)
+#         self.logits = nn.Linear(dims[-1], action_dim)
+
+#     def forward(self, states):
+#         x = self.mlp(states)
+#         logits = self.logits(x)
+#         return Categorical(logits=logits)
 class DiscretePolicy(nn.Module):
-    def __init__(self, state_dim, hidden_dims, action_dim):
+    def __init__(self, state_dim, hidden_dims, action_dim, horizon, time_embed_dim=8):
         super().__init__()
-        dims = [state_dim] + hidden_dims
+        self.time_emb = nn.Embedding(horizon+1, time_embed_dim)
+        dims = [state_dim + time_embed_dim] + hidden_dims
         layers = []
         for i in range(len(dims) - 1):
             layers += [nn.Linear(dims[i], dims[i+1]), nn.ReLU()]
         self.mlp = nn.Sequential(*layers)
         self.logits = nn.Linear(dims[-1], action_dim)
 
-    def forward(self, states):
-        x = self.mlp(states)
-        logits = self.logits(x)
+    def forward(self, states, timesteps):
+        t = timesteps.squeeze(-1)
+        emb = self.time_emb(t)
+        x = torch.cat([states, emb], dim=-1)
+        logits = self.logits(self.mlp(x))
         return Categorical(logits=logits)
