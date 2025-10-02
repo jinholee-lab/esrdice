@@ -251,12 +251,18 @@ class Fair_Taxi_MDP_Penalty_V2(gym.Env):
         '''
         Create  graphics
         '''
-        if self.window is None and mode == "human":
+        
+        # font 초기화 (headless 환경 대비)
+        if not pygame.get_init():
             pygame.init()
-            pygame.display.init()
-            self.window = pygame.display.set_mode((self.window_size, self.window_size))
-        if self.clock is None and mode == "human":
-            self.clock = pygame.time.Clock()
+        if not pygame.font.get_init():
+            pygame.font.init()
+        # if self.window is None and mode == "human":
+        #     pygame.init()
+        #     pygame.display.init()
+        #     self.window = pygame.display.set_mode((self.window_size, self.window_size))
+        # if self.clock is None and mode == "human":
+        #     self.clock = pygame.time.Clock()
         
         canvas = pygame.Surface((self.window_size, self.window_size))
         canvas.fill((255, 255, 255))
@@ -336,18 +342,24 @@ class Fair_Taxi_MDP_Penalty_V2(gym.Env):
                 width=1,
             )
         
-        # Output visualization
-        self.window.blit(canvas, canvas.get_rect())
-        if self.pass_idx != None: self.window.blit(pass_label, pass_label_rect)
-        for i in range(len(self.loc_coords)): self.window.blit(loc_pos[i][0], loc_pos[i][1])
-        if self.share_dest == False:
-            for i in range(len(self.dest_coords)): self.window.blit(dest_pos[i][0], dest_pos[i][1])
-            
-        pygame.event.pump()
-        pygame.display.update()
-        self.clock.tick(self.metadata["render_fps"]) # add a delay to keep the framerate stable
+        if mode == "human":
+            self.window.blit(canvas, canvas.get_rect())
+            if self.pass_idx is not None:
+                self.window.blit(pass_label, pass_label_rect)
+            for i in range(len(self.loc_coords)):
+                self.window.blit(loc_pos[i][0], loc_pos[i][1])
+            if self.share_dest is False:
+                for i in range(len(self.dest_coords)):
+                    self.window.blit(dest_pos[i][0], dest_pos[i][1])
+                    
+            pygame.event.pump()
+            pygame.display.update()
+            self.clock.tick(self.metadata["render_fps"])
+            return
         
-        return
+        elif mode == "rgb_array":
+            # numpy array (H, W, 3) 반환
+            return np.transpose(pygame.surfarray.array3d(canvas), (1, 0, 2))
         
     
         

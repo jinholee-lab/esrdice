@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+from utils import Utility
+
 def evaluate_policy(
     env,
     agent,
@@ -30,32 +32,62 @@ def evaluate_policy(
     agent.policy.eval()
     return_vector_list = []
     scalarized_return_list = []
+    if config.utility_kind == "linear":
+        # set utility as piecewise_log with uniform weights
+        weights = np.ones(config.reward_dim, dtype=np.float32)
+        utility = Utility(kind="piecewise_log", weights=weights)
     
     for ep in range(num_episodes):
-        state = env.reset(taxi_loc = [9,9])
+        # state = env.reset(taxi_loc = [9,9])
+        # state = env.reset(taxi_loc = [4, 5])
+        state = env.reset(taxi_loc = [5,4])
         done = False
         step = 0
-        Racc = np.zeros(2, dtype=np.float32)  # accumulated reward vector
+        Racc = np.zeros(len(config.loc_coords), dtype=np.float32)  # accumulated reward vector
         ep_rewards = []
 
         while not done and step < max_steps:
             # state preprocessing
             s_decoded = list(env.decode(state))
-            if getattr(config, "one_hot_pass_idx", False):
-                one_hot = np.zeros(len(env.dest_coords) + 1, dtype=np.float32)
-                one_hot[s_decoded[3]] = 1.0
-                s_feat = np.array([s_decoded[0], s_decoded[1], s_decoded[2]] + one_hot.tolist(), dtype=np.float32)
+            taxi_x, taxi_y, pass_loc, pass_idx = s_decoded
+            feats = []
+
+            # --- Taxi 위치 ---
+            if getattr(config, "one_hot_xy", False):
+                taxi_x_oh = np.eye(env.size)[taxi_x]
+                taxi_y_oh = np.eye(env.size)[taxi_y]
+                feats.append(taxi_x_oh)
+                feats.append(taxi_y_oh)
             else:
-                s_feat = np.array(s_decoded, dtype=np.float32)
+                feats.append([taxi_x])
+                feats.append([taxi_y])
 
+            # --- Passenger 상태 ---
+            feats.append([pass_loc])
+
+            if getattr(config, "one_hot_pass_idx", False):
+                pass_idx_oh = np.eye(len(env.dest_coords) + 1)[pass_idx]
+                feats.append(pass_idx_oh)
+            else:
+                feats.append([pass_idx])
+
+            feats = np.concatenate(feats, axis=0)
+
+            # --- Raccs 붙이기 ---
             if getattr(config, "concat_acc_reward", False):
-                s_feat = np.concatenate([s_feat, Racc], axis=0)
+                feats = np.concatenate([feats, Racc], axis=0)
 
-            s_tensor = torch.tensor(s_feat, dtype=torch.float32, device=agent.device).unsqueeze(0)
+            s_tensor = torch.tensor(feats, dtype=torch.float32, device=agent.device).unsqueeze(0)
             t_tensor = torch.tensor([[step]], dtype=torch.long, device=agent.device)
             with torch.no_grad():
                 dist = agent.policy(s_tensor, t_tensor)  # [1, A]
-                action = dist.probs.argmax(dim=-1).item()
+                
+                if getattr(config, "policy_rollout", "stochastic") == "stochastic":
+                    # stochastic
+                    action = dist.sample().item()
+                else:
+                    # deterministic
+                    action = dist.probs.argmax(dim=-1).item()
 
             next_state, original_reward_vec, done = env.step(action)
             original_reward_vec = np.array(original_reward_vec, dtype=np.float32)

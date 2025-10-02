@@ -11,6 +11,7 @@ from pathlib import Path
 from utils import *
 from buffer import ReplayBuffer
 from finitedice import FiniteOptiDICE
+from finitefairdice import FiniteFairDICE
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
 from evaluate import evaluate_policy
 from divergence import FDivergence
@@ -195,8 +196,9 @@ def preprocess_scalarization(dataset, utility):
     esr = esr.astype(np.float32)[:, None]             # [N,1]
 
     new_dataset = dataset.copy()
-    new_dataset["rewards"] = esr
+    new_dataset["scalarized_rewards"] = esr
     return new_dataset
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -206,7 +208,8 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--num_steps", type=int, default=50000)
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument("--log_interval", type=int, default=1000)
+    parser.add_argument("--num_eval_episodes", type=int, default=100)
 
     # ---- Env setup ----
     parser.add_argument("--size", type=int, default=10)
@@ -219,10 +222,12 @@ def main():
     parser.add_argument("--horizon", type=int, default=100)
     parser.add_argument("--alpha", type=float, default=1)
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[128, 128])
+    parser.add_argument("--weights", type=float, nargs="+", default=[1.0, 1.0])
     parser.add_argument("--time_embed_dim", type=int, default=8)
     parser.add_argument("--layer_norm", type=bool, default=True)
     parser.add_argument("--policy_lr", type=float, default=3e-4)
     parser.add_argument("--nu_lr", type=float, default=3e-4)
+    parser.add_argument("--mu_lr", type=float, default=3e-4)
     parser.add_argument("--f_divergence", type=str, default="Chi",
                         choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
@@ -233,36 +238,33 @@ def main():
     # ---- Dataset / Replay buffer ----
     parser.add_argument("--dataset_path", type=str, default="./data/dataset_v3.npy")
     parser.add_argument("--one_hot_pass_idx", type=bool, default=True)
-    parser.add_argument("--concat_acc_reward", type=bool, default=True)
+    parser.add_argument("--concat_acc_reward", type=bool, default=False)
     parser.add_argument("--normalization_method", type=str, default="linear", choices=["zscore", "minmax", "linear"])
+    parser.add_argument("--one_hot_xy", type=bool, default=True)
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
-    parser.add_argument("--wandb_project", type=str, default="esrdice")
+    parser.add_argument("--wandb_project", type=str, default="AET_v1")
     parser.add_argument("--tag", type=str, default="test")
+    
+    # ---- mode ----
+    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser"])
+    parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
+    
 
     args = parser.parse_args()
 
-    # reshape coords
-    loc_coords = [[0,0],[3,2]]
-    dest_coords = [[0,4],[3,3]]
-
-    # return args
-
-
-    # def main():
-        # config = get_config()
     config = args
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
     # ---- Env init ----
-    size, loc_coords, dest_coords = get_setting(args.size, args.reward_dim)
+    config.size, config.loc_coords, config.dest_coords = get_setting(args.size, args.reward_dim)
 
     env = Fair_Taxi_MDP_Penalty_V2(
-        size=size,
-        loc_coords=loc_coords,
-        dest_coords=dest_coords,
+        size=config.size,
+        loc_coords=config.loc_coords,
+        dest_coords=config.dest_coords,
         fuel=config.fuel,
         output_path=config.output_path
     )
@@ -287,13 +289,15 @@ def main():
     dataset = preprocess_states(
         dataset,
         env,
-        one_hot_xy=False,
+        one_hot_xy=config.one_hot_xy,
         one_hot_pass_idx=config.one_hot_pass_idx,
         concat_raccs=config.concat_acc_reward,
     )
     
     config.state_dim = dataset["states"].shape[1]
     config.action_dim = env.action_space.n
+    if config.mode == "esr":
+        dataset['rewards'] = dataset['scalarized_rewards']  # ESR 학습을 위해 scalarized reward로 교체
     config.reward_dim = dataset["rewards"].shape[1]  # scalarized reward
     print(f"State dim: {config.state_dim}, Action dim: {config.action_dim}, Reward dim: {config.reward_dim}")
     
@@ -301,10 +305,18 @@ def main():
     buffer = ReplayBuffer(device=config.device)
     buffer.load_dataset(dataset)
 
-    # ---- Initialize OptiDICE ----
+    # ---- Initialize DICE ----
     config.f_divergence = FDivergence(config.f_divergence)
-    agent = FiniteOptiDICE(config, device=config.device)
 
+    if config.mode == "esr":
+        agent = FiniteOptiDICE(config, device=config.device)
+        print("Using FiniteOptiDICE for ESR optimization.")
+    elif config.mode == "ser":
+        agent = FiniteFairDICE(config, device=config.device)
+        print("Using FiniteFairDICE for SER optimization.")
+    else:
+        raise ValueError("Invalid mode. Choose 'esr' or 'ser'.")
+    
     print("✅ Environment and agent initialized.")
     print("Config:", config)
     
@@ -331,7 +343,7 @@ def main():
                 eval_results = evaluate_policy(
                     env,
                     agent,
-                    num_episodes=10,
+                    num_episodes=config.num_eval_episodes,
                     config=config,
                     max_steps=config.horizon,
                     normalization_method=config.normalization_method,
@@ -365,9 +377,7 @@ def main():
         os.makedirs(save_dir, exist_ok=True)
         agent.save(os.path.join(save_dir, "final_model.pth"))
 
-        return stats_history
-
-    stats_history = train(
+    train(
         agent,
         buffer,
         num_steps= config.num_steps,

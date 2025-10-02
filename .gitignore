@@ -6,3 +6,6 @@ FairMORL/*.ipynb
 taxi_q_tables_V1
 checkpoints/
 wandb/
+FairMORL/
+*.sh
+*.ipynb
