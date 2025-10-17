@@ -73,8 +73,9 @@ def preprocess_rewards(dataset, method="linear"):
                                 "min" : min_val}
     else:
         # no normalization
-        print("[Warning] No normalization applied.")
-        pass
+        new_dataset["rewards"] = arr
+        max_val = arr.max() 
+        stat_dict["rewards"] = {"max" : max_val}
 
     return new_dataset, stat_dict
 
@@ -237,10 +238,10 @@ def main():
 
     # ---- Dataset / Replay buffer ----
     parser.add_argument("--dataset_path", type=str, default="./data/dataset_v3.npy")
-    parser.add_argument("--one_hot_pass_idx", type=bool, default=True)
+    parser.add_argument("--one_hot_xy", type=bool, default=False)
+    parser.add_argument("--one_hot_pass_idx", type=bool, default=False)
     parser.add_argument("--concat_acc_reward", type=bool, default=False)
-    parser.add_argument("--normalization_method", type=str, default="linear", choices=["zscore", "minmax", "linear"])
-    parser.add_argument("--one_hot_xy", type=bool, default=True)
+    parser.add_argument("--normalization_method", type=str, default="linear", choices=["zscore", "minmax", "linear", "none"])
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
@@ -250,7 +251,6 @@ def main():
     # ---- mode ----
     parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
-    
 
     args = parser.parse_args()
 
@@ -282,7 +282,7 @@ def main():
     dataset = preprocess_Raccs(dataset, horizon=config.horizon)
     
     # ---- Preprocess scalarization ----
-    utility = Utility(kind=config.utility_kind, weights=None, shift=0.0)
+    utility = Utility(kind=config.utility_kind, weights=config.fixed_weights, shift=0.0)
     dataset = preprocess_scalarization(dataset, utility)
     
     # ---- Preprocess states ----
@@ -298,13 +298,13 @@ def main():
     config.action_dim = env.action_space.n
     if config.mode == "esr":
         dataset['rewards'] = dataset['scalarized_rewards']  # ESR 학습을 위해 scalarized reward로 교체
-    config.reward_dim = dataset["rewards"].shape[1]  # scalarized reward
+    config.reward_dim = dataset["rewards"].shape[1]  # reward dim (D)
     print(f"State dim: {config.state_dim}, Action dim: {config.action_dim}, Reward dim: {config.reward_dim}")
     
     # ---- Replay Buffer ----
     buffer = ReplayBuffer(device=config.device)
     buffer.load_dataset(dataset)
-
+    
     # ---- Initialize DICE ----
     config.f_divergence = FDivergence(config.f_divergence)
 
@@ -321,11 +321,13 @@ def main():
     print("Config:", config)
     
     # ---- wandb logging ----
+    run_name = f"{config.mode}_{config.utility_kind}_alpha{config.alpha}_{config.f_divergence}_seed{config.seed}"
+
     if config.use_wandb:
         wandb.init(
             project=config.wandb_project,
             config=vars(config),
-            name=f"{config.tag}_seed{config.seed}",
+            name=run_name,
         )
     
         
@@ -373,9 +375,9 @@ def main():
             # stats_history.append(stats)
 
         # Save final model and stats
-        save_dir = os.path.join(config.save_path, f"{config.tag}_seed{config.seed}")
+        save_dir = os.path.join(config.save_path, run_name)
         os.makedirs(save_dir, exist_ok=True)
-        agent.save(os.path.join(save_dir, "final_model.pth"))
+        agent.save(os.path.join(save_dir, "model.pth"))
 
     train(
         agent,
@@ -384,7 +386,6 @@ def main():
         batch_size= config.batch_size,
         log_interval=config.log_interval
     )
-    
     if config.use_wandb:
         wandb.finish()
 

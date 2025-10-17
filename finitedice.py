@@ -46,7 +46,6 @@ class FiniteOptiDICE(nn.Module):
         # -----------------
         self.policy_optim = optim.Adam(self.policy.parameters(), lr=config.policy_lr)
         self.nu_optim = optim.Adam(self.nu.parameters(), lr=config.nu_lr)
-        # in FiniteOptiDICE.__init__
         self.policy_scheduler = CosineAnnealingLR(self.policy_optim, T_max=config.num_steps, eta_min=1e-5)
         self.nu_scheduler = CosineAnnealingLR(self.nu_optim, T_max=config.num_steps, eta_min=1e-5)
 
@@ -101,7 +100,7 @@ class FiniteOptiDICE(nn.Module):
         loss_term = (state_action_ratio * e - self.alpha * f(state_action_ratio, self.f_div)).mean()
         nu_loss = loss_term + gp_coeff * nu_grad_penalty + init_term
 
-        return nu_loss, (e.detach(), nu_grad_penalty.detach(), init_term.detach(), 
+        return nu_loss, (e.detach(), nu_grad_penalty.detach() if gp_coeff > 0 else 0.0, init_term.detach(),
                          loss_term.detach(), nu_vals.mean().detach(),
                          next_nu.mean().detach())
 

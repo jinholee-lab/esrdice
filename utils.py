@@ -50,16 +50,12 @@ class Utility:
 
     weights가 None이면 입력 차원에 맞춰 균등가중치로 자동 설정.
     """
-    def __init__(self, kind="linear", weights=None, shift=0.0, eps=1e-6, x_max=1.0, y_max=1.0):
-        assert kind in ("linear", "log", "piecewise_log", "custom_quadratic")
+    def __init__(self, kind="linear", weights=None, shift=0.0, eps=1e-6):
+        assert kind in ("linear", "log", "piecewise_log")
         self.kind    = kind
         self.weights = np.array([1.0, 1.0]) if weights is None else np.asarray(weights, np.float32)
         self.shift   = float(shift)
         self.eps     = eps
-
-        # quadratic 전용 파라미터
-        self.x_max   = float(x_max)
-        self.y_max   = float(y_max)
 
     def _ensure_weights(self, R):
         if self.weights is None:
@@ -80,17 +76,6 @@ class Utility:
         out[~mask] = -0.5 * (x[~mask] - 2.0)**2 + 0.5  # quadratic region
         return out
 
-    def _custom_quadratic(self, x: np.ndarray) -> np.ndarray:
-        """
-        Custom quadratic function:
-        - (0,0)을 지나고
-        - (x_max, y_max)에서 최대값
-        f(x) = -(y_max / x_max^2) * (x - x_max)^2 + y_max
-        """
-        x = np.asarray(x, dtype=np.float32)
-        a = -self.y_max / (self.x_max**2 + self.eps)
-        return a * (x - self.x_max)**2 + self.y_max
-
     def __call__(self, R: np.ndarray) -> np.ndarray:
         R = np.asarray(R, dtype=np.float32)  # [N,D] or [D]
         self._ensure_weights(R)
@@ -101,7 +86,5 @@ class Utility:
             return (np.log(R + self.shift + self.eps) * self.weights).sum(axis=-1)
         elif self.kind == "piecewise_log":
             return (self._piecewise_log(R) * self.weights).sum(axis=-1)
-        elif self.kind == "custom_quadratic":
-            return (self._custom_quadratic(R) * self.weights).sum(axis=-1)
         else:
             raise NotImplementedError
