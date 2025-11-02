@@ -175,29 +175,44 @@ def preprocess_states(
 
     return new_dataset
 
-
-def preprocess_scalarization(dataset, utility):
+def preprocess_scalarization(dataset, utility, keep_dims=False, horizon=100, add_u0_to="first"):
     """
-    Scalarization된 ESR 보상 계산 후 dataset에 추가
-
-    Args:
-      dataset: dict
-        - 'Raccs' : [N, D]
-        - 'rewards' : [N, D]
-      utility: Utility 객체 (u(R))
-
-    Returns:
-      new_dataset: dataset에 'rewards_esr' 추가
+    ESR step-wise 보상을 계산하고, 에피소드당 한 번 u(0)를 더해
+    총합이 정확히 u(R_T)와 일치하도록 보정합니다.
     """
     Raccs   = dataset["Raccs"]      # [N, D]
     rewards = dataset["rewards"]    # [N, D]
+    N, D    = rewards.shape
 
-    # ESR step-wise reward
-    esr = utility(Raccs + rewards) - utility(Raccs)   # [N]
-    esr = esr.astype(np.float32)[:, None]             # [N,1]
+    # 1) 기본 ESR: u(R_{t+1}) - u(R_t)
+    esr = utility(Raccs + rewards, keep_dims=keep_dims) - utility(Raccs, keep_dims=keep_dims)
 
-    new_dataset = dataset.copy()
-    new_dataset["scalarized_rewards"] = esr
+    # 2) 에피소드 보정: 한 번만 u(0) 더하기 (합 == u(R_T))
+    if horizon is not None:
+        if N % horizon != 0:
+            raise ValueError(f"N={N} is not a multiple of horizon={horizon}. "
+                             "Use timesteps-based correction instead.")
+
+        # u(0) 계산 (keep_dims에 따라 스칼라 또는 (D,))
+        if keep_dims:
+            u0 = utility(np.zeros((1, D), dtype=np.float32), keep_dims=True)[0]   # shape (D,)
+        else:
+            u0 = utility(np.zeros((1, D), dtype=np.float32), keep_dims=False)[0]  # scalar
+
+        if add_u0_to == "first":
+            # 각 에피소드의 첫 스텝 인덱스: 0, H, 2H, ...
+            idx = np.arange(0, N, horizon)
+        elif add_u0_to == "last":
+            # 각 에피소드의 마지막 스텝 인덱스: H-1, 2H-1, ...
+            idx = np.arange(horizon-1, N, horizon)
+        else:
+            raise ValueError("add_u0_to must be 'first' or 'last'.")
+
+        esr[idx] += u0  # 브로드캐스팅으로 (N,) 또는 (N,D) 모두 안전
+
+    # 3) dataset 업데이트
+    new_dataset = dict(dataset)
+    new_dataset["rewards"] = esr.astype(np.float32, copy=False)
     return new_dataset
 
 
@@ -223,7 +238,6 @@ def main():
     parser.add_argument("--horizon", type=int, default=100)
     parser.add_argument("--alpha", type=float, default=1)
     parser.add_argument("--hidden_dims", type=int, nargs="+", default=[128, 128])
-    parser.add_argument("--weights", type=float, nargs="+", default=[1.0, 1.0])
     parser.add_argument("--time_embed_dim", type=int, default=8)
     parser.add_argument("--layer_norm", type=bool, default=True)
     parser.add_argument("--policy_lr", type=float, default=3e-4)
@@ -232,7 +246,8 @@ def main():
     parser.add_argument("--f_divergence", type=str, default="Chi",
                         choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
-
+    parser.add_argument("--fair_alpha", type=float, default=1.0)
+    
     # ---- path ----
     parser.add_argument("--save_path", type=str, default="./checkpoints/")
 
@@ -249,7 +264,7 @@ def main():
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
-    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser"])
+    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
     args = parser.parse_args()
@@ -258,6 +273,11 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
+    if config.mode == "AET":
+        keep_dims = True
+    else:
+        keep_dims = False
+        
     # ---- Env init ----
     config.size, config.loc_coords, config.dest_coords = get_setting(args.size, args.reward_dim)
 
@@ -282,8 +302,11 @@ def main():
     dataset = preprocess_Raccs(dataset, horizon=config.horizon)
     
     # ---- Preprocess scalarization ----
-    utility = Utility(kind=config.utility_kind, weights=config.fixed_weights, shift=0.0)
-    dataset = preprocess_scalarization(dataset, utility)
+    utility = Utility(
+        kind=config.utility_kind,
+        alpha=1 - config.fair_alpha
+        )
+    dataset = preprocess_scalarization(dataset, utility, keep_dims=keep_dims)
     
     # ---- Preprocess states ----
     dataset = preprocess_states(
@@ -296,8 +319,8 @@ def main():
     
     config.state_dim = dataset["states"].shape[1]
     config.action_dim = env.action_space.n
-    if config.mode == "esr":
-        dataset['rewards'] = dataset['scalarized_rewards']  # ESR 학습을 위해 scalarized reward로 교체
+    # if config.mode == "esr":
+    #     dataset['rewards'] = dataset['scalarized_rewards']  # ESR 학습을 위해 scalarized reward로 교체
     config.reward_dim = dataset["rewards"].shape[1]  # reward dim (D)
     print(f"State dim: {config.state_dim}, Action dim: {config.action_dim}, Reward dim: {config.reward_dim}")
     
@@ -314,6 +337,10 @@ def main():
     elif config.mode == "ser":
         agent = FiniteFairDICE(config, device=config.device)
         print("Using FiniteFairDICE for SER optimization.")
+    elif config.mode == "AET":
+        from AET import FiniteAET
+        agent = FiniteAET(config, device=config.device)
+        print("Using FiniteAET for AET optimization.")
     else:
         raise ValueError("Invalid mode. Choose 'esr' or 'ser'.")
     
@@ -321,7 +348,10 @@ def main():
     print("Config:", config)
     
     # ---- wandb logging ----
-    run_name = f"{config.mode}_{config.utility_kind}_alpha{config.alpha}_{config.f_divergence}_seed{config.seed}"
+    run_name = f"{config.mode}_{config.utility_kind}_alpha{config.alpha}_{config.f_divergence}"
+    if config.mode == "AET":
+        run_name += f"_fair_alpha{config.fair_alpha}"
+    run_name += f"_seed{config.seed}"
 
     if config.use_wandb:
         wandb.init(
@@ -350,15 +380,16 @@ def main():
                     max_steps=config.horizon,
                     normalization_method=config.normalization_method,
                     norm_stats=norm_stats,
-                    utility=utility                # ESR 학습에 썼던 Utility
+                    # utility=utility,
                 )
                 
                 if config.use_wandb:
                     wandb.log({"train/" + k: v for k, v in stats.items()}, step=step)
                     wandb.log({
                         "eval/linear_scalarized_return": eval_results["linear_scalarized_return"],
-                        f"eval/expected_scalarized_return_{config.utility_kind}": eval_results[f"expected_scalarized_return_{config.utility_kind}"],
-                        f"eval/scalarized_expected_return_{config.utility_kind}": eval_results[f"scalarized_expected_return_{config.utility_kind}"],
+                        "eval/expected_scalarized_return_piecewise_log": eval_results["expected_scalarized_return_piecewise_log"],
+                        "eval/scalarized_expected_return_piecewise_log": eval_results["scalarized_expected_return_piecewise_log"],
+                        "eval/primary_objective": eval_results["primary_objective"],
                     }, step=step)
     
                     # log the individual dimensions of the expected return vector

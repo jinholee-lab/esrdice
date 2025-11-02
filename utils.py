@@ -37,31 +37,24 @@ def get_setting(size, num_locs):
         dest_coords = [[0,4],[5,0],[3,3],[0,9],[4,7],[8,3]]
     return size, loc_coords, dest_coords
 
+EPS = 1e-12
+
 class Utility:
     """
-    u(R)를 스칼라로 반환.
+    Utility function for multi-objective RL
     kind: "linear" | "log" | "piecewise_log"
-      - linear       : u(R)=w^T R
-      - log          : u(R)=sum_i w_i * log(R_i + shift)
-      - piecewise_log: u(R)=sum_i w_i * u_piecewise(R_i)
-                       (log(x)와 음수 허용 구간까지 매끄럽게 연결한 함수)
-      - custom_quadratic: u(R)=sum_i w_i * q(R_i)
-                         (q는 (0,0)을 지나고 (x_max, y_max)에서 최대값을 갖는 quadratic)
-
-    weights가 None이면 입력 차원에 맞춰 균등가중치로 자동 설정.
+      - linear       : u(R)= R_i
+      - log          : u(R)= log(R_i)
+      - piecewise_log: u(R)= u_piecewise(R_i)
+      - alpha_fairness: u(R)= u_alpha_fairness(R_i) 
     """
-    def __init__(self, kind="linear", weights=None, shift=0.0, eps=1e-6):
-        assert kind in ("linear", "log", "piecewise_log")
+    def __init__(self, kind="linear", alpha=0.5):
+        assert kind in ("linear", "log", "piecewise_log", "alpha_fairness"), f"Unknown utility kind: {kind}"
         self.kind    = kind
-        self.weights = np.array([1.0, 1.0]) if weights is None else np.asarray(weights, np.float32)
-        self.shift   = float(shift)
-        self.eps     = eps
+        self.alpha   = alpha
 
-    def _ensure_weights(self, R):
-        if self.weights is None:
-            D = R.shape[-1]
-            self.weights = np.ones(D, dtype=np.float32) / float(D)
-            
+    def _log(self, x: np.ndarray) -> np.ndarray:
+        return np.log(x+EPS)
 
     def _piecewise_log(self, x: np.ndarray) -> np.ndarray:
         """
@@ -72,19 +65,74 @@ class Utility:
         x = np.asarray(x, dtype=np.float32)
         out = np.empty_like(x)
         mask = (x >= 1)
-        out[mask] = np.log(x[mask] + self.eps)   # log region
+        out[mask] = np.log(x[mask])   # log region
         out[~mask] = -0.5 * (x[~mask] - 2.0)**2 + 0.5  # quadratic region
         return out
+    
+    def _frac(self, x: np.ndarray) -> np.ndarray:
+        return ((x + EPS)**(1 - self.alpha) - 1) / (1 - self.alpha)
+    
+    def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
+        """
+        piecewise utility:
+        - x >= 1: (x^{1-alpha} - 1) / (1 - alpha)
+        - x <  1 : e^{-alpha}(x-1) + (1-e^{-alpha})(-0.5*(x-2)^2 + 0.5)
+        """
+        x = np.asarray(x, dtype=np.float32)
+        out = np.empty_like(x)
+        mask = (x >= 1)
+        out[mask] = (x[mask]**(1 - self.alpha) - 1) / (1 - self.alpha)   # fractional region
 
-    def __call__(self, R: np.ndarray) -> np.ndarray:
-        R = np.asarray(R, dtype=np.float32)  # [N,D] or [D]
-        self._ensure_weights(R)
+        s = float(np.exp((-self.alpha)))  # e^{-α}
+        q_lin  = x[~mask] - 1.0
+        q_quad = -0.5*(x[~mask] - 2.0)**2 + 0.5
+        out[~mask] = s * q_lin + (1.0 - s) * q_quad
 
+        return out
+    
+    def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
+        """
+        piecewise utility:
+        - x >= 1: (x^{1-alpha} - 1) / (1 - alpha)
+        - x <  1 : e^{-alpha}(x-1) + (1-e^{-alpha})(-0.5*(x-2)^2 + 0.5)
+        """
+        x = np.asarray(x, dtype=np.float32)
+        out = np.empty_like(x)
+        mask = (x >= 1)
+        out[mask] = (x[mask]**(1 - self.alpha)) / (1 - self.alpha)   # fractional region
+
+        s = float(np.exp((-self.alpha)))  # e^{-α}
+        q_lin  = x[~mask]
+        q_quad = -0.5*(x[~mask] - 2.0)**2 + 0.5
+        out[~mask] = s * q_lin + (1.0 - s) * q_quad
+
+        return out
+
+    def _alpha_fairness(self, x: np.ndarray) -> np.ndarray:
+        if self.alpha == 1.0:
+            return self._piecewise_log(x)
+            # return self._log(x)
+        else:
+            return self._piecewise_frac(x)
+            # return self._frac(x)
+
+    def _transform(self, R: np.ndarray) -> np.ndarray:
         if self.kind == "linear":
-            return (R * self.weights).sum(axis=-1)
+            return R
         elif self.kind == "log":
-            return (np.log(R + self.shift + self.eps) * self.weights).sum(axis=-1)
+            return self._log(R)
         elif self.kind == "piecewise_log":
-            return (self._piecewise_log(R) * self.weights).sum(axis=-1)
+            return self._piecewise_log(R)
+        elif self.kind == "alpha_fairness":
+            return self._alpha_fairness(R)
         else:
             raise NotImplementedError
+
+    def __call__(self, R: np.ndarray, keep_dims: bool = False) -> np.ndarray:
+        R = np.asarray(R, dtype=np.float32)  # [N,D]
+        X = self._transform(R)          # [N,D]
+        
+        if keep_dims:
+            return X               # [N,D]
+        else:
+            return X.sum(axis=-1)  # [N]

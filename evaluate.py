@@ -32,11 +32,13 @@ def evaluate_policy(
     agent.policy.eval()
     return_vector_list = []
     scalarized_return_list = []
-    if config.utility_kind == "linear":
-        # set utility as piecewise_log with uniform weights
-        weights = np.ones(config.reward_dim, dtype=np.float32)
-        utility = Utility(kind="piecewise_log", weights=weights)
-    
+    return_vector_list_of_primary_objective = []
+
+    eval_utility = Utility(kind="piecewise_log")
+    if config.utility_kind == "alpha_fairness":
+        vector_transform_utility = Utility(kind="alpha_fairness", alpha=1 - config.fair_alpha)
+        scalarization_utility = Utility(kind="alpha_fairness", alpha=config.fair_alpha)
+        
     for ep in range(num_episodes):
         # state = env.reset(taxi_loc = [9,9])
         # state = env.reset(taxi_loc = [4, 5])
@@ -97,6 +99,8 @@ def evaluate_policy(
                 if norm_stats is None:
                     raise ValueError("norm_stats must be provided for normalization.")
                 normalized_reward_vec = original_reward_vec / norm_stats["rewards"]["max"]
+            elif normalization_method == "minmax":
+                normalized_reward_vec = original_reward_vec / norm_stats["rewards"]["max"] #TODO: check
             else:
                 # no normalization
                 normalized_reward_vec = original_reward_vec
@@ -114,15 +118,16 @@ def evaluate_policy(
         one_episode_return_vector = np.sum(ep_rewards, axis=0)
         return_vector_list.append(one_episode_return_vector)
 
-        if utility is not None:
-            one_episode_scalarized_return = utility(one_episode_return_vector)
-        else:
-            one_episode_scalarized_return = one_episode_return_vector.sum()  # fallback: 단순합
-    
+        one_episode_scalarized_return = eval_utility(one_episode_return_vector)
         scalarized_return_list.append(one_episode_scalarized_return)
+        
+        # --- episode summary of primary objective ---
+        one_episode_return_vector_of_primary_objective = vector_transform_utility(one_episode_return_vector, keep_dims=True)
+        return_vector_list_of_primary_objective.append(one_episode_return_vector_of_primary_objective)
 
     scalarized_return_array = np.array(scalarized_return_list) # episode level
     return_vector_array = np.array(return_vector_list) # episode level
+    return_vector_array_of_primary_objective = np.array(return_vector_list_of_primary_objective)  # episode level
 
     # Expected vector return
     expected_return_vector = return_vector_array.mean(axis=0)
@@ -134,17 +139,25 @@ def evaluate_policy(
 
     # Expected scalarized return
     expected_scalarized_return = scalarized_return_array.mean()
-    print(f"Expected Scalarized Return: {expected_scalarized_return}")
-    
+    print(f"Expected Scalarized Return {eval_utility.kind}: {expected_scalarized_return}")
+
     # Scalarized expected return
-    scalarized_expected_return = utility(expected_return_vector) if utility is not None else expected_return_vector.sum()
-    print(f"Scalarized Expected Return: {scalarized_expected_return}")
+    scalarized_expected_return = eval_utility(expected_return_vector)
+    print(f"Scalarized Expected Return {eval_utility.kind}: {scalarized_expected_return}")
+    
+    # Primary objective
+    expected_return_vector_of_primary_objective = return_vector_array_of_primary_objective.mean(axis=0)
+    print(f"Expected Return Vector of Primary Objective: {expected_return_vector_of_primary_objective}")
+    scalarized_expected_return_of_primary_objective = scalarization_utility(expected_return_vector_of_primary_objective, keep_dims=False)
+    print(f"Scalarized Expected Return of Primary Objective: {scalarized_expected_return_of_primary_objective}")
 
 
     results = {
         "expected_return_vector": expected_return_vector,
         "linear_scalarized_return": linear_scalarized_return,
-        f"expected_scalarized_return_{config.utility_kind}": expected_scalarized_return,
-        f"scalarized_expected_return_{config.utility_kind}": scalarized_expected_return,
+        f"expected_scalarized_return_{eval_utility.kind}": expected_scalarized_return,
+        f"scalarized_expected_return_{eval_utility.kind}": scalarized_expected_return,
+        # "expected_return_vector_of_primary_objective": expected_return_vector_of_primary_objective,
+        "primary_objective": scalarized_expected_return_of_primary_objective,
     }
     return results
