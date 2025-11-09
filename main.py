@@ -111,6 +111,72 @@ def preprocess_Raccs(dataset, horizon):
     new_dataset["next_Raccs"] = next_Raccs
     return new_dataset
 
+def augment_same_timestep(
+    dataset: dict,
+    num_aug_per_sample: int = 1,
+    rng: np.random.Generator = None,
+):
+    N = len(dataset["states"])
+    rng = np.random.default_rng() if rng is None else rng
+
+    # timestep -> indices
+    timesteps = np.asarray(dataset["timesteps"]).astype(int)
+    buckets = {}
+    for i, t in enumerate(timesteps):
+        buckets.setdefault(t, []).append(i)
+
+    aug = {k: [] for k in dataset.keys()}
+    must_copy = [
+        "states","actions","rewards","next_states",
+        "timesteps","next_timesteps","Raccs","next_Raccs"
+    ]
+
+    for i in range(N):
+        t = int(timesteps[i])
+        src_list = buckets[t]
+
+        for _ in range(num_aug_per_sample):
+            j = int(rng.choice(src_list))
+            s      = dataset["states"][i]
+            a      = dataset["actions"][i]
+            r_vec  = dataset["rewards"][i]          # original vector reward
+            s_next = dataset["next_states"][i]
+
+            Racc   = dataset["Raccs"][j].astype(np.float32, copy=False)
+            t_aug  = int(dataset["timesteps"][j])
+
+            next_Racc = (Racc + r_vec).astype(np.float32, copy=False)
+            next_t    = t_aug + 1
+
+            aug["states"].append(s)
+            aug["actions"].append(a)
+            aug["rewards"].append(r_vec)
+            aug["next_states"].append(s_next)
+            aug["timesteps"].append(t_aug)
+            aug["next_timesteps"].append(next_t)
+            aug["Raccs"].append(Racc)
+            aug["next_Raccs"].append(next_Racc)
+
+            # 기타 1차원 배치 키들 복사
+            for k, v in dataset.items():
+                if k in must_copy:
+                    continue
+                if isinstance(v, np.ndarray) and len(v) == N:
+                    aug[k].append(v[i])
+
+    for k, v in list(aug.items()):
+        if len(v) > 0:
+            aug[k] = np.asarray(v)
+
+    new_dataset = {}
+    for k in dataset.keys():
+        if k in aug and len(aug[k]) > 0:
+            new_dataset[k] = np.concatenate([dataset[k], aug[k]], axis=0)
+        else:
+            new_dataset[k] = dataset[k]
+    return new_dataset
+
+
 def preprocess_states(
     dataset,
     env,
@@ -184,9 +250,9 @@ def preprocess_scalarization(dataset, utility, keep_dims=False, horizon=100, add
     rewards = dataset["rewards"]    # [N, D]
     N, D    = rewards.shape
 
-    # 1) 기본 ESR: u(R_{t+1}) - u(R_t)
+    # 1) ESR: u(R_{t+1}) - u(R_t)
     esr = utility(Raccs + rewards, keep_dims=keep_dims) - utility(Raccs, keep_dims=keep_dims)
-
+ 
     # 2) 에피소드 보정: 한 번만 u(0) 더하기 (합 == u(R_T))
     if horizon is not None:
         if N % horizon != 0:
@@ -230,9 +296,9 @@ def main():
     # ---- Env setup ----
     parser.add_argument("--size", type=int, default=10)
     parser.add_argument("--fuel", type=int, default=100)
-    parser.add_argument("--output_path", type=str, default="./outputs/")
     parser.add_argument("--reward_dim", type=int, default=2)
     parser.add_argument("--utility_kind", type=str, default="piecewise_log")
+    parser.add_argument("--output_path", type=str, default="./outputs/")
 
     # ---- Hyperparameter setup ----
     parser.add_argument("--horizon", type=int, default=100)
@@ -247,6 +313,10 @@ def main():
                         choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
     parser.add_argument("--fair_alpha", type=float, default=1.0)
+    parser.add_argument("--f_divergence_threshold", type=float, default=None)
+    parser.add_argument("--lambda_lr", type=float, default=3e-4)
+    parser.add_argument("--lambda_init", type=float, default=1e-5)
+    parser.add_argument("--use_fixed_lambda", type=bool, default=False)
     
     # ---- path ----
     parser.add_argument("--save_path", type=str, default="./checkpoints/")
@@ -264,7 +334,7 @@ def main():
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
-    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET"])
+    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET", "AET_constraint"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
     args = parser.parse_args()
@@ -273,7 +343,7 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
-    if config.mode == "AET":
+    if config.mode == "AET" or config.mode == "AET_constraint":
         keep_dims = True
     else:
         keep_dims = False
@@ -300,6 +370,14 @@ def main():
     
     # ---- Preprocess Raccs ----
     dataset = preprocess_Raccs(dataset, horizon=config.horizon)
+    
+    # >>>>>>> 여기에 증강 호출 삽입 <<<<<<<
+    # same-timestep 증강 (배수는 1부터 시작 권장)
+    # dataset = augment_same_timestep(
+    #     dataset,
+    #     num_aug_per_sample=1,
+    #     rng=np.random.default_rng(config.seed)
+    # )
     
     # ---- Preprocess scalarization ----
     utility = Utility(
@@ -340,7 +418,10 @@ def main():
     elif config.mode == "AET":
         from AET import FiniteAET
         agent = FiniteAET(config, device=config.device)
-        print("Using FiniteAET for AET optimization.")
+    elif config.mode == "AET_constraint":
+        from AET_constraint import FiniteAET
+        agent = FiniteAET(config, device=config.device)
+        print("Using FiniteAET for AET_constraint optimization.")
     else:
         raise ValueError("Invalid mode. Choose 'esr' or 'ser'.")
     
