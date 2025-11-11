@@ -15,9 +15,10 @@ class CriticTime(nn.Module):
         super().__init__()
         self.horizon = horizon
         self.time_emb = nn.Embedding(horizon + 1, time_embed_dim)
-
-        in_dim = state_dim + time_embed_dim
-        dims = [in_dim] + hidden_dims + [1]
+        self.state_dim = state_dim
+        self.time_embed_dim = time_embed_dim
+        self.in_dim = state_dim + time_embed_dim
+        dims = [self.in_dim] + hidden_dims + [1]
         layers = []
         for i in range(len(dims) - 2):
             layers += [nn.Linear(dims[i], dims[i+1]), nn.ReLU()]

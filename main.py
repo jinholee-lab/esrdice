@@ -8,14 +8,14 @@ import torch
 
 from enum import Enum
 from pathlib import Path
-from utils import *
+from utils import get_setting
 from buffer import ReplayBuffer
 from finitedice import FiniteOptiDICE
 from finitefairdice import FiniteFairDICE
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
 from evaluate import evaluate_policy
 from divergence import FDivergence
-
+from utility import Utility
 import wandb
 
 # ---- import 환경 및 함수 ----
@@ -110,72 +110,6 @@ def preprocess_Raccs(dataset, horizon):
     new_dataset["Raccs"] = Raccs
     new_dataset["next_Raccs"] = next_Raccs
     return new_dataset
-
-def augment_same_timestep(
-    dataset: dict,
-    num_aug_per_sample: int = 1,
-    rng: np.random.Generator = None,
-):
-    N = len(dataset["states"])
-    rng = np.random.default_rng() if rng is None else rng
-
-    # timestep -> indices
-    timesteps = np.asarray(dataset["timesteps"]).astype(int)
-    buckets = {}
-    for i, t in enumerate(timesteps):
-        buckets.setdefault(t, []).append(i)
-
-    aug = {k: [] for k in dataset.keys()}
-    must_copy = [
-        "states","actions","rewards","next_states",
-        "timesteps","next_timesteps","Raccs","next_Raccs"
-    ]
-
-    for i in range(N):
-        t = int(timesteps[i])
-        src_list = buckets[t]
-
-        for _ in range(num_aug_per_sample):
-            j = int(rng.choice(src_list))
-            s      = dataset["states"][i]
-            a      = dataset["actions"][i]
-            r_vec  = dataset["rewards"][i]          # original vector reward
-            s_next = dataset["next_states"][i]
-
-            Racc   = dataset["Raccs"][j].astype(np.float32, copy=False)
-            t_aug  = int(dataset["timesteps"][j])
-
-            next_Racc = (Racc + r_vec).astype(np.float32, copy=False)
-            next_t    = t_aug + 1
-
-            aug["states"].append(s)
-            aug["actions"].append(a)
-            aug["rewards"].append(r_vec)
-            aug["next_states"].append(s_next)
-            aug["timesteps"].append(t_aug)
-            aug["next_timesteps"].append(next_t)
-            aug["Raccs"].append(Racc)
-            aug["next_Raccs"].append(next_Racc)
-
-            # 기타 1차원 배치 키들 복사
-            for k, v in dataset.items():
-                if k in must_copy:
-                    continue
-                if isinstance(v, np.ndarray) and len(v) == N:
-                    aug[k].append(v[i])
-
-    for k, v in list(aug.items()):
-        if len(v) > 0:
-            aug[k] = np.asarray(v)
-
-    new_dataset = {}
-    for k in dataset.keys():
-        if k in aug and len(aug[k]) > 0:
-            new_dataset[k] = np.concatenate([dataset[k], aug[k]], axis=0)
-        else:
-            new_dataset[k] = dataset[k]
-    return new_dataset
-
 
 def preprocess_states(
     dataset,
@@ -371,20 +305,12 @@ def main():
     # ---- Preprocess Raccs ----
     dataset = preprocess_Raccs(dataset, horizon=config.horizon)
     
-    # >>>>>>> 여기에 증강 호출 삽입 <<<<<<<
-    # same-timestep 증강 (배수는 1부터 시작 권장)
-    # dataset = augment_same_timestep(
-    #     dataset,
-    #     num_aug_per_sample=1,
-    #     rng=np.random.default_rng(config.seed)
-    # )
-    
     # ---- Preprocess scalarization ----
     utility = Utility(
         kind=config.utility_kind,
         alpha=1 - config.fair_alpha
         )
-    dataset = preprocess_scalarization(dataset, utility, keep_dims=keep_dims)
+    # dataset = preprocess_scalarization(dataset, utility, keep_dims=keep_dims) TODO: check
     
     # ---- Preprocess states ----
     dataset = preprocess_states(
@@ -392,10 +318,10 @@ def main():
         env,
         one_hot_xy=config.one_hot_xy,
         one_hot_pass_idx=config.one_hot_pass_idx,
-        concat_raccs=config.concat_acc_reward,
+        concat_raccs=config.concat_acc_reward, # Raccs
     )
     
-    config.state_dim = dataset["states"].shape[1]
+    config.state_dim = dataset["states"].shape[1] + (config.reward_dim if not config.concat_acc_reward else 0)
     config.action_dim = env.action_space.n
     # if config.mode == "esr":
     #     dataset['rewards'] = dataset['scalarized_rewards']  # ESR 학습을 위해 scalarized reward로 교체
@@ -403,7 +329,13 @@ def main():
     print(f"State dim: {config.state_dim}, Action dim: {config.action_dim}, Reward dim: {config.reward_dim}")
     
     # ---- Replay Buffer ----
-    buffer = ReplayBuffer(device=config.device)
+    buffer = ReplayBuffer(
+        device=config.device,
+        utility=utility,
+        horizon=config.horizon,
+        keep_dims=keep_dims,
+        reward_dim=config.reward_dim
+    )
     buffer.load_dataset(dataset)
     
     # ---- Initialize DICE ----

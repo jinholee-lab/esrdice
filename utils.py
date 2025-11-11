@@ -72,23 +72,23 @@ class Utility:
     def _frac(self, x: np.ndarray) -> np.ndarray:
         return ((x + EPS)**(1 - self.alpha) - 1) / (1 - self.alpha)
     
-    def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
-        """
-        piecewise utility:
-        - x >= 1: (x^{1-alpha} - 1) / (1 - alpha)
-        - x <  1 : e^{-alpha}(x-1) + (1-e^{-alpha})(-0.5*(x-2)^2 + 0.5)
-        """
-        x = np.asarray(x, dtype=np.float32)
-        out = np.empty_like(x)
-        mask = (x >= 1)
-        out[mask] = (x[mask]**(1 - self.alpha) - 1) / (1 - self.alpha)   # fractional region
+    # def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
+    #     """
+    #     piecewise utility:
+    #     - x >= 1: (x^{1-alpha} - 1) / (1 - alpha)
+    #     - x <  1 : e^{-alpha}(x-1) + (1-e^{-alpha})(-0.5*(x-2)^2 + 0.5)
+    #     """
+    #     x = np.asarray(x, dtype=np.float32)
+    #     out = np.empty_like(x)
+    #     mask = (x >= 1)
+    #     out[mask] = (x[mask]**(1 - self.alpha) - 1) / (1 - self.alpha)   # fractional region
 
-        s = float(np.exp((-self.alpha)))  # e^{-α}
-        q_lin  = x[~mask] - 1.0
-        q_quad = -0.5*(x[~mask] - 2.0)**2 + 0.5
-        out[~mask] = s * q_lin + (1.0 - s) * q_quad
+    #     s = float(np.exp((-self.alpha)))  # e^{-α}
+    #     q_lin  = x[~mask] - 1.0
+    #     q_quad = -0.5*(x[~mask] - 2.0)**2 + 0.5
+    #     out[~mask] = s * q_lin + (1.0 - s) * q_quad
 
-        return out
+    #     return out
     
     def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
         """
@@ -128,7 +128,10 @@ class Utility:
         else:
             raise NotImplementedError
 
-    def __call__(self, R: np.ndarray, keep_dims: bool = False) -> np.ndarray:
+    def __call__(self,
+                 R: np.ndarray,
+                 keep_dims: bool = False,
+                ) -> np.ndarray:
         R = np.asarray(R, dtype=np.float32)  # [N,D]
         X = self._transform(R)          # [N,D]
         

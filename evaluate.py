@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from utils import Utility
+from utility import Utility
 
 def evaluate_policy(
     env,
@@ -11,7 +11,6 @@ def evaluate_policy(
     max_steps=100,
     normalization_method="linear",
     norm_stats=None,
-    utility=None,
 ):
     """
     Evaluate trained policy with normalization and utility.
@@ -75,9 +74,9 @@ def evaluate_policy(
 
             feats = np.concatenate(feats, axis=0)
 
-            # --- Raccs 붙이기 ---
-            if getattr(config, "concat_acc_reward", False):
-                feats = np.concatenate([feats, Racc], axis=0)
+            # --- Raccs ---
+            # if getattr(config, "concat_acc_reward", False):
+            feats = np.concatenate([feats, Racc], axis=0)
 
             s_tensor = torch.tensor(feats, dtype=torch.float32, device=agent.device).unsqueeze(0)
             t_tensor = torch.tensor([[step]], dtype=torch.long, device=agent.device)
@@ -115,42 +114,42 @@ def evaluate_policy(
 
 
         # --- episode summary --- 
-        one_episode_return_vector = np.sum(ep_rewards, axis=0)
-        return_vector_list.append(one_episode_return_vector)
-
-        one_episode_scalarized_return = eval_utility(one_episode_return_vector)
-        scalarized_return_list.append(one_episode_scalarized_return)
+        ep_return_vector = np.sum(ep_rewards, axis=0)
         
-        # --- episode summary of primary objective ---
-        one_episode_return_vector_of_primary_objective = vector_transform_utility(one_episode_return_vector, keep_dims=True)
-        return_vector_list_of_primary_objective.append(one_episode_return_vector_of_primary_objective)
-
-    scalarized_return_array = np.array(scalarized_return_list) # episode level
-    return_vector_array = np.array(return_vector_list) # episode level
-    return_vector_array_of_primary_objective = np.array(return_vector_list_of_primary_objective)  # episode level
-
+        ep_return_vector_tensor = torch.as_tensor(ep_return_vector, dtype=torch.float32)
+        ep_scalarized_return_tensor = eval_utility(ep_return_vector_tensor, keep_dims=False)
+        ep_primary_objective_scalarized_return_tensor = vector_transform_utility(ep_return_vector_tensor, keep_dims=True)
+        
+        return_vector_list.append(ep_return_vector_tensor)
+        scalarized_return_list.append(ep_scalarized_return_tensor)
+        return_vector_list_of_primary_objective.append(ep_primary_objective_scalarized_return_tensor)
+        # --- end of episode ---
+    
+    scalarized_return_tensor = torch.stack(scalarized_return_list)  # episode level
+    return_vector_tensor = torch.stack(return_vector_list)  # episode level
+    return_vector_tensor_of_primary_objective = torch.stack(return_vector_list_of_primary_objective)  # episode level
+    
     # Expected vector return
-    expected_return_vector = return_vector_array.mean(axis=0)
+    expected_return_vector = return_vector_tensor.mean(dim=0)
     print(f"Expected Return Vector: {expected_return_vector}")
 
     # Linear scalarization of expected return vector
-    linear_scalarized_return = expected_return_vector.sum()
+    linear_scalarized_return = expected_return_vector.sum().item()
     print(f"Linear Scalarized Return: {linear_scalarized_return}")
 
     # Expected scalarized return
-    expected_scalarized_return = scalarized_return_array.mean()
+    expected_scalarized_return = scalarized_return_tensor.mean().item()
     print(f"Expected Scalarized Return {eval_utility.kind}: {expected_scalarized_return}")
 
     # Scalarized expected return
-    scalarized_expected_return = eval_utility(expected_return_vector)
+    scalarized_expected_return = eval_utility(expected_return_vector).item()
     print(f"Scalarized Expected Return {eval_utility.kind}: {scalarized_expected_return}")
     
     # Primary objective
-    expected_return_vector_of_primary_objective = return_vector_array_of_primary_objective.mean(axis=0)
+    expected_return_vector_of_primary_objective = return_vector_tensor_of_primary_objective.mean(dim=0)
     print(f"Expected Return Vector of Primary Objective: {expected_return_vector_of_primary_objective}")
     scalarized_expected_return_of_primary_objective = scalarization_utility(expected_return_vector_of_primary_objective, keep_dims=False)
     print(f"Scalarized Expected Return of Primary Objective: {scalarized_expected_return_of_primary_objective}")
-
 
     results = {
         "expected_return_vector": expected_return_vector,
