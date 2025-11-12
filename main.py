@@ -310,7 +310,8 @@ def main():
         kind=config.utility_kind,
         alpha=1 - config.fair_alpha
         )
-    # dataset = preprocess_scalarization(dataset, utility, keep_dims=keep_dims) TODO: check
+
+    # dataset = preprocess_scalarization(dataset, utility, keep_dims=keep_dims) # We do this in the buffer now
     
     # ---- Preprocess states ----
     dataset = preprocess_states(
