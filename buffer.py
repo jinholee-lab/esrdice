@@ -7,7 +7,8 @@ class ReplayBuffer:
                  utility: Utility = None, 
                  horizon: int = None,
                  keep_dims: bool = False,
-                 reward_dim: int = None
+                 reward_dim: int = None,
+                 aug_ratio: float = 0.5
                  ):
         """
         capacity: 최대 저장 용량 (None이면 dataset 크기와 동일)
@@ -20,7 +21,7 @@ class ReplayBuffer:
         self.horizon = horizon
         self.keep_dims = keep_dims
         self.reward_dim = reward_dim
-        
+        self.aug_ratio = aug_ratio
         # Calculate u(0) once and store it (on device)
         u0 = self.utility(
                         torch.zeros(1,self.reward_dim, dtype=torch.float32),
@@ -71,6 +72,18 @@ class ReplayBuffer:
             raise ValueError("Dataset must contain 'Raccs' key for reward augmentation.")
             
         print(f"[ReplayBuffer] Loaded dataset with {self.size} transitions. (to {self.device})")
+        
+    def _scalarize(self, Raccs, rewards, timesteps):
+        u_Racc = self.utility(Raccs, keep_dims=self.keep_dims)
+        u_Racc_next = self.utility(Raccs + rewards, keep_dims=self.keep_dims)
+        scalarized_rewards = u_Racc_next - u_Racc
+        
+        is_first_step = (timesteps == 0).float()
+        if self.keep_dims:
+            scalarized_rewards= scalarized_rewards + self.u0.unsqueeze(0) * is_first_step.unsqueeze(-1)
+        else:
+            scalarized_rewards= scalarized_rewards + self.u0 * is_first_step
+        return scalarized_rewards
 
     def sample(self, batch_size):
         """
@@ -86,34 +99,33 @@ class ReplayBuffer:
         timesteps = self.buffer["timesteps"][idxs]
         next_timesteps = self.buffer["next_timesteps"][idxs]
         
+        # original Raccs and next_Raccs
+        Raccs_original = self.buffer["Raccs"][idxs]
+        Raccs_next_original = self.buffer["next_Raccs"][idxs]
+        
         # Augmentation
         #   Raccs and next_Raccs
         Raccs_indices = torch.randint(0, self.num_unique_Raccs, (batch_size,), device=self.device) 
         Raccs_aug = self.unique_Raccs[Raccs_indices]
         Raccs_next_aug = Raccs_aug + original_rewards
         
+        # mask to decide whether to augment or not
+        augment_mask = (torch.rand(batch_size, device=self.device) < self.aug_ratio).unsqueeze(-1)
+        Raccs_final = torch.where(augment_mask, Raccs_aug, Raccs_original)
+        Raccs_next_final = torch.where(augment_mask, Raccs_next_aug, Raccs_next_original)
+        
         #   timesteps and next_timesteps      
         # timesteps_aug = torch.randint(0, self.horizon, (batch_size,), device=self.device)
         # next_timesteps_aug = timesteps_aug + 1
         
-        
         #   Concatenate augmented Raccs to states
-        states_aug = torch.cat([states, Raccs_aug], dim=-1)
-        next_states_aug = torch.cat([next_states, Raccs_next_aug], dim=-1)
-        initial_Raccs = torch.zeros_like(Raccs_aug, device=self.device)
+        states_aug = torch.cat([states, Raccs_final], dim=-1)
+        next_states_aug = torch.cat([next_states, Raccs_next_final], dim=-1)
+        initial_Raccs = torch.zeros_like(Raccs_final, device=self.device)
         initial_states_aug = torch.cat([initial_states, initial_Raccs], dim=-1)
         
         # Scalarization
-        u_Racc = self.utility(Raccs_aug, keep_dims=self.keep_dims)
-        u_Racc_next = self.utility(Raccs_next_aug, keep_dims=self.keep_dims)
-        scalarized_rewards = u_Racc_next - u_Racc
-        
-        is_first_step = (timesteps == 0).float()
-        
-        if self.keep_dims:
-            scalarized_rewards= scalarized_rewards + self.u0.unsqueeze(0) * is_first_step.unsqueeze(-1)
-        else:
-            scalarized_rewards= scalarized_rewards + self.u0 * is_first_step
+        scalarized_rewards = self._scalarize(Raccs_final, original_rewards, timesteps)
         
         batch = {
             "states": states_aug,

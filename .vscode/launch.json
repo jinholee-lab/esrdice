@@ -15,7 +15,7 @@
             "args": [
                 "--seed", "42",
                 "--device", "cuda",
-                "--num_steps", "200000",
+                "--num_steps", "300000",
                 "--log_interval", "1000",
                 "--batch_size", "256",
                 "--horizon", "100",
@@ -41,7 +41,7 @@
                 "--mode", "AET_constraint",
                 "--policy_rollout", "stochastic",
                 "--tag", "AET_test_constraint_augmentation",
-                "--f_divergence_threshold", "8e4",
+                "--f_divergence_threshold", "1e5",
                 // "--use_fixed_lambda", "True",
                 "--use_wandb", "True",
             ]
