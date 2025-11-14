@@ -90,23 +90,23 @@ class Utility:
 
         return out
     
-    def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
-        """
-        piecewise utility:
-        - x >= 1: (x^{1-alpha} - 1) / (1 - alpha)
-        - x <  1 : e^{-alpha}(x-1) + (1-e^{-alpha})(-0.5*(x-2)^2 + 0.5)
-        """
-        x = np.asarray(x, dtype=np.float32)
-        out = np.empty_like(x)
-        mask = (x >= 1)
-        out[mask] = (x[mask]**(1 - self.alpha)) / (1 - self.alpha)   # fractional region
+    # def _piecewise_frac(self, x: np.ndarray) -> np.ndarray:
+    #     """
+    #     piecewise utility:
+    #     - x >= 1: (x^{1-alpha} - 1) / (1 - alpha)
+    #     - x <  1 : e^{-alpha}(x-1) + (1-e^{-alpha})(-0.5*(x-2)^2 + 0.5)
+    #     """
+    #     x = np.asarray(x, dtype=np.float32)
+    #     out = np.empty_like(x)
+    #     mask = (x >= 1)
+    #     out[mask] = (x[mask]**(1 - self.alpha)) / (1 - self.alpha)   # fractional region
 
-        s = float(np.exp((-self.alpha)))  # e^{-α}
-        q_lin  = x[~mask]
-        q_quad = -0.5*(x[~mask] - 2.0)**2 + 0.5
-        out[~mask] = s * q_lin + (1.0 - s) * q_quad
+    #     s = float(np.exp((-self.alpha)))  # e^{-α}
+    #     q_lin  = x[~mask]
+    #     q_quad = -0.5*(x[~mask] - 2.0)**2 + 0.5
+    #     out[~mask] = s * q_lin + (1.0 - s) * q_quad
 
-        return out
+    #     return out
 
     def _alpha_fairness(self, x: np.ndarray) -> np.ndarray:
         if self.alpha == 1.0:

@@ -2,6 +2,7 @@
     // VS Code debug setting
     "version": "0.2.0",
     "configurations": [
+
         {
             "name": "Python Debugger: Train Fair Taxi",
             "type": "debugpy",
@@ -37,8 +38,8 @@
                 "--one_hot_xy", "True",
                 "--one_hot_pass_idx", "True",
                 "--lambda_lr", "3e-4",
-                // "--mode", "AET",
-                "--mode", "AET_constraint",
+                "--mode", "AET",
+                // "--mode", "AET_constraint",
                 "--policy_rollout", "stochastic",
                 "--tag", "AET_test_constraint",
                 "--f_divergence_threshold", "8e4",

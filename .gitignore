@@ -9,3 +9,4 @@ wandb/
 FairMORL/
 *.sh
 *.ipynb
+.vscode/*

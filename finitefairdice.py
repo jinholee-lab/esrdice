@@ -8,6 +8,7 @@ from torch.distributions import Categorical
 from divergence import f, FDivergence, f_derivative_inverse
 from network import DiscretePolicy
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import torch.nn.functional as F
 
 class MuNetwork(nn.Module):
     def __init__(self, config):
@@ -42,7 +43,7 @@ class CriticTime(nn.Module):
         out = self.net(x).squeeze(-1)                             # [B]
         # ★ ν(s,H)=0: t==H에서 0
         return out * (t < self.horizon).float()
-    
+
 
 def piecewise_log_k_star(mu):  # mu: Tensor [...], unweighted case
     # k* solves mu = u'(k)
@@ -237,3 +238,4 @@ class FiniteFairDICE(nn.Module):
 
     def load(self, path):
         self.load_state_dict(torch.load(path, map_location=self.device))
+

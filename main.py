@@ -13,7 +13,7 @@ from buffer import ReplayBuffer
 from finitedice import FiniteOptiDICE
 from finitefairdice import FiniteFairDICE
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
-from evaluate import evaluate_policy
+from evaluate import evaluate_policy, evaluate_policy_vector
 from divergence import FDivergence
 
 import wandb
@@ -416,8 +416,11 @@ def main():
         agent = FiniteFairDICE(config, device=config.device)
         print("Using FiniteFairDICE for SER optimization.")
     elif config.mode == "AET":
-        from AET import FiniteAET
-        agent = FiniteAET(config, device=config.device)
+        #from AET import FiniteAET
+        #agent = FiniteAET(config, device=config.device)
+        from AET import FiniteAET_Vector
+        print("Initialing Vector form")
+        agent = FiniteAET_Vector(config, device=config.device)        
     elif config.mode == "AET_constraint":
         from AET_constraint import FiniteAET
         agent = FiniteAET(config, device=config.device)
@@ -439,6 +442,7 @@ def main():
             project=config.wandb_project,
             config=vars(config),
             name=run_name,
+            entity = "wsk208"
         )
     
         
@@ -453,16 +457,28 @@ def main():
             if step % log_interval == 0:
                 print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k,v in stats.items()]))
                 
-                eval_results = evaluate_policy(
-                    env,
-                    agent,
-                    num_episodes=config.num_eval_episodes,
-                    config=config,
-                    max_steps=config.horizon,
-                    normalization_method=config.normalization_method,
-                    norm_stats=norm_stats,
-                    # utility=utility,
-                )
+                if True: # 이거 나중에 고쳐야 함.
+                    eval_results = evaluate_policy_vector(
+                        env,
+                        agent,
+                        num_episodes=config.num_eval_episodes,
+                        config=config,
+                        max_steps=config.horizon,
+                        normalization_method=config.normalization_method,
+                        norm_stats=norm_stats,
+                        # utility=utility,
+                    )
+                else:
+                    eval_results = evaluate_policy(
+                        env,
+                        agent,
+                        num_episodes=config.num_eval_episodes,
+                        config=config,
+                        max_steps=config.horizon,
+                        normalization_method=config.normalization_method,
+                        norm_stats=norm_stats,
+                        # utility=utility,
+                    )                    
                 
                 if config.use_wandb:
                     wandb.log({"train/" + k: v for k, v in stats.items()}, step=step)
