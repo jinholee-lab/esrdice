@@ -13,7 +13,7 @@ from buffer import ReplayBuffer
 from finitedice import FiniteOptiDICE
 from finitefairdice import FiniteFairDICE
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
-from evaluate import evaluate_policy
+from evaluate import evaluate_policy, evaluate_policy_vector
 from divergence import FDivergence
 from utility import Utility
 import wandb
@@ -264,11 +264,11 @@ def main():
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
-    parser.add_argument("--wandb_project", type=str, default="AET_v1")
+    parser.add_argument("--wandb_project", type=str, default="AET_v1115")
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
-    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET", "AET_constraint"])
+    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET", "AET_constraint", "AET_constraint_vector"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
     args = parser.parse_args()
@@ -277,7 +277,7 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
-    if config.mode == "AET" or config.mode == "AET_constraint":
+    if config.mode == "AET" or config.mode == "AET_constraint" or config.mode == "AET_constraint_vector":
         keep_dims = True
     else:
         keep_dims = False
@@ -355,6 +355,10 @@ def main():
         from AET_constraint import FiniteAET
         agent = FiniteAET(config, device=config.device)
         print("Using FiniteAET for AET_constraint optimization.")
+    elif config.mode == "AET_constraint_vector":
+        print("Initiating vector form version...")
+        from AET_constraint import FiniteAET_vector
+        agent = FiniteAET_vector(config, device=config.device)
     else:
         raise ValueError("Invalid mode. Choose 'esr' or 'ser'.")
     
@@ -362,7 +366,7 @@ def main():
     print("Config:", config)
     
     # ---- wandb logging ----
-    run_name = f"{config.mode}_{config.utility_kind}_alpha{config.alpha}_{config.f_divergence}"
+    run_name = f"{config.mode}_{config.utility_kind}_budget{config.f_divergence_threshold}_{config.f_divergence}"
     if config.mode == "AET":
         run_name += f"_fair_alpha{config.fair_alpha}"
     run_name += f"_seed{config.seed}"
@@ -372,11 +376,12 @@ def main():
             project=config.wandb_project,
             config=vars(config),
             name=run_name,
+            entity = 'wsk208'
         )
     
         
     # ---- Training loop ----
-    def train(agent, buffer, num_steps=10000, batch_size=256, log_interval=100):
+    def train(agent, buffer, num_steps=10000, batch_size=256, log_interval=100, vector_mode = None):
         # stats_history = []
 
         for step in range(1, num_steps + 1):
@@ -386,16 +391,29 @@ def main():
             if step % log_interval == 0:
                 print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k,v in stats.items()]))
                 
-                eval_results = evaluate_policy(
-                    env,
-                    agent,
-                    num_episodes=config.num_eval_episodes,
-                    config=config,
-                    max_steps=config.horizon,
-                    normalization_method=config.normalization_method,
-                    norm_stats=norm_stats,
-                    # utility=utility,
-                )
+                if vector_mode != "AET_constraint_vector":
+                    eval_results = evaluate_policy(
+                        env,
+                        agent,
+                        num_episodes=config.num_eval_episodes,
+                        config=config,
+                        max_steps=config.horizon,
+                        normalization_method=config.normalization_method,
+                        norm_stats=norm_stats,
+                        # utility=utility,
+                    )
+                else:
+                    #print("Initiating Evalaution on vector policy")
+                    eval_results = evaluate_policy_vector(
+                        env,
+                        agent,
+                        num_episodes=config.num_eval_episodes,
+                        config=config,
+                        max_steps=config.horizon,
+                        normalization_method=config.normalization_method,
+                        norm_stats=norm_stats,
+                        # utility=utility,
+                    )
                 
                 if config.use_wandb:
                     wandb.log({"train/" + k: v for k, v in stats.items()}, step=step)
@@ -429,7 +447,8 @@ def main():
         buffer,
         num_steps= config.num_steps,
         batch_size= config.batch_size,
-        log_interval=config.log_interval
+        log_interval=config.log_interval,
+        vector_mode = config.mode
     )
     if config.use_wandb:
         wandb.finish()

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 from divergence import f, FDivergence, f_derivative_inverse
-from network import DiscretePolicy, CriticTime
+from network import DiscretePolicy, DiscretePolicyMultiHead, CriticTime, CriticTimeVector
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 EPS = 1e-12
@@ -282,6 +282,251 @@ class FiniteAET(nn.Module):
         self.policy_optim.zero_grad()
         policy_loss, w = self.policy_loss_fn(
             states, actions, rewards, next_states, timesteps, next_timesteps
+        )
+        policy_loss.backward()
+        self.policy_optim.step()
+        self.policy_scheduler.step()
+
+        self.step += 1
+        
+
+        return {
+            "policy_loss": float(policy_loss.item()),
+            "nu_loss": float(nu_loss.item()),
+            "w_mean": float(w.mean().item()),
+            "w_std": float(w.std().item()),
+            "w_max": float(w.max().item()),
+            "w_min": float(w.min().item()),
+            "e_mean": float(e.mean().item()),
+            "e_std": float(e.std().item()),
+            "e_min": float(e.min().item()),
+            "e_max": float(e.max().item()),
+            "nu_grad_penalty": float(nu_grad_penalty.item()) if isinstance(nu_grad_penalty, torch.Tensor) else 0.0,
+            "init_loss": float(init_loss.item()),
+            "advantage_loss": float(advantage_loss.item()),
+            "util_loss": float(util_loss.item()),
+            "nu_vals_mean": float(nu_vals_mean.item()),
+            "next_nu_mean": float(next_nu_mean.item()),
+            "f_vals_mean": float(f_vals_mean.item()),
+            # "lambda_f_div": float(self.lambda_f_div.detach().item()),
+            "lambda_f_div": float(self.get_lambda().detach().item()),
+            "mu_0": float(self.mu().detach()[0].item()),
+            "mu_1": float(self.mu().detach()[1].item()),
+        }
+
+    # Save / Load
+    def save(self, path):
+        torch.save(self.state_dict(), path)
+
+    def load(self, path):
+        self.load_state_dict(torch.load(path, map_location=self.device))
+
+class FiniteAET_vector(nn.Module):
+    """
+    Finite-horizon (time-dependent ν), ν(s,H)=0.
+    """
+    def __init__(self, config, device="cuda"):
+        super().__init__()
+        self.config = config
+        self.device = device
+        self.H = config.horizon
+        self.f_div = config.f_divergence
+
+        lambda_f_div_0 = config.lambda_init # initial value for λ (f-divergence constraint)
+        # self.register_buffer("lambda_f_div", torch.tensor(float(lambda_f_div_0)))
+        # self.f_div_threshold = config.f_divergence_threshold # f-divergence constraint threshold C
+        # self.lambda_lr = config.lambda_lr # learning rate for λ (f-divergence constraint)
+        
+        self.f_div_threshold = config.f_divergence_threshold # f-divergence constraint threshold C
+        
+        if config.use_fixed_lambda:
+            self.register_buffer("lambda_f_div", torch.tensor(float(lambda_f_div_0)))
+            self.log_lambda_f_div = None
+            self.lambda_optim = None
+        else:
+            self.log_lambda_f_div = nn.Parameter(torch.tensor(float(np.log(lambda_f_div_0))).to(device))
+            self.lambda_optim = optim.Adam([self.log_lambda_f_div], lr=config.lambda_lr)
+            self.lambda_scheduler = CosineAnnealingLR(self.lambda_optim, T_max=config.num_steps, eta_min=1e-6)  
+            self.register_buffer("lambda_f_div", None) # Will be computed from log_lambda_f_div
+    
+        # Networks
+        self.policy = DiscretePolicyMultiHead(   # time-dependent policy
+            state_dim=config.state_dim,
+            hidden_dims=config.hidden_dims,
+            action_dim=config.action_dim,
+            horizon=config.horizon
+        ).to(device)
+
+
+        # time-dependent ν
+        self.nu = CriticTimeVector(
+            state_dim=config.state_dim,
+            hidden_dims=config.hidden_dims,
+            horizon=config.horizon,
+            layer_norm=config.layer_norm,
+        ).to(device)
+        
+        if config.fair_alpha == 0.0: # ESR case
+            self.mu = MuNetwork(config, learnable=False).to(device)
+            self.mu_optim = None
+        else: # SER case
+            self.mu = MuNetwork(config, learnable=True).to(device)
+            self.mu_optim = optim.Adam(self.mu.parameters(), lr=config.mu_lr)
+
+        # Optimizers
+        self.policy_optim = optim.Adam(self.policy.parameters(), lr=config.policy_lr)
+        self.nu_optim = optim.Adam(self.nu.parameters(), lr=config.nu_lr)
+        self.policy_scheduler = CosineAnnealingLR(self.policy_optim, T_max=config.num_steps, eta_min=1e-6)
+        self.nu_scheduler = CosineAnnealingLR(self.nu_optim, T_max=config.num_steps, eta_min=1e-6)
+        
+        self.step = 0
+
+    def train(self, batch):
+        return self.train_step(batch)
+
+    def _update_lambda(self, div_mean:torch.Tensor):
+        if self.config.use_fixed_lambda:
+            return  # do not update lambda if using fixed lambda
+        
+        update_amount = div_mean - self.f_div_threshold
+        print("Divergence mean:", div_mean.item(), " Update amount:", update_amount.item())
+        new_lambda = self.lambda_f_div + self.lambda_lr * update_amount
+
+        new_lambda = torch.clamp(new_lambda, min=1e-5, max=1e3)
+        print("Updated lambda_f_div:", new_lambda.item())
+        self.lambda_f_div.copy_(new_lambda)
+        
+    def get_lambda(self):
+        """Helper to get current lambda value"""
+        if self.config.use_fixed_lambda:
+            return self.lambda_f_div
+        else:
+            # Compute from log_lambda_f_div, ensuring it's positive
+            return torch.exp(self.log_lambda_f_div)
+
+    # Loss functions
+    def nu_loss_fn(self, states, next_states, timesteps, next_timesteps, rewards, initial_states):
+        nu_curr = self.nu(states)
+        nu_next = self.nu(next_states)
+        nu_t   = nu_curr[:, :-1]
+        nu_tp1 = nu_next[:,  1:] 
+        init_nu = self.nu(initial_states, torch.zeros_like(timesteps))  # [B]
+        
+        mu = self.mu()  # [R]
+        scalar = (rewards @ mu)
+        e_nonflat      = scalar[:, None] + nu_tp1 - nu_t    # [B]
+        e = e_nonflat.reshape(-1)
+
+        lambda_f_div = self.get_lambda()
+
+        # w = (f')^{-1}(e/λ); w >= 0
+        state_action_ratio = f_derivative_inverse(e / lambda_f_div, self.f_div)
+        state_action_ratio = torch.nn.functional.relu(state_action_ratio)
+
+        # f(w)
+        f_vals = f(state_action_ratio, self.f_div)
+
+        # loss
+        loss_1 = init_nu.mean()
+        loss_2 = (state_action_ratio * e - lambda_f_div * f_vals).mean()
+        if self.config.fair_alpha == 0.0:
+            loss_3 = torch.tensor(0.0, device=states.device)
+        elif self.config.fair_alpha == 1.0:
+            loss_3 = piecewise_log_u_star_neg_mu(mu).sum()
+        else:
+            loss_3 = piecewise_frac_u_star_neg_mu(mu, self.config.fair_alpha).sum()
+
+        # gradient penalty for ν
+        gp_coeff = getattr(self.config, "nu_grad_penalty_coeff", 0.0)
+        
+        if gp_coeff > 0.0:
+            eps = torch.rand(states.shape[0], 1, device=states.device)
+            states_inter = eps * states + (1 - eps) * next_states
+            states_inter.requires_grad_(True)
+            nu_out = self.nu(states_inter, timesteps)
+            grads = torch.autograd.grad(
+                outputs=nu_out,
+                inputs=states_inter,
+                grad_outputs=torch.ones_like(nu_out),
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+            )[0]
+            nu_grad_penalty = (grads.norm(dim=-1) ** 2).mean()
+        else:
+            nu_grad_penalty = 0.0
+
+        nu_loss = loss_1 + loss_2 + loss_3 + gp_coeff * nu_grad_penalty
+
+        return nu_loss, (e, nu_grad_penalty, loss_1, loss_2, loss_3, nu_t.mean(), nu_tp1.mean(), f_vals.mean().detach())
+
+    def policy_loss_fn(self, states, actions, rewards, next_states):
+        logits = self.policy(states)
+        logp_all = logits.log_softmax(dim=-1)
+        idx = actions.view(-1, 1, 1).expand(-1, logp_all.size(1), 1)
+        log_probs = torch.gather(logp_all, dim=-1, index=idx).squeeze(-1) # [B,H]
+
+        nu_curr = self.nu(states)       # [B, H+1]
+        nu_next = self.nu(next_states)  # [B, H+1]
+        nu_t   = nu_curr[:, :-1]        # [B, H]
+        nu_tp1 = nu_next[:, 1:]
+        
+        mu = self.mu()
+        r_scalar = rewards @ mu # [B, H]
+        r_scalar_expanded = r_scalar.unsqueeze(1).expand(-1, self.H)
+        e = r_scalar_expanded + nu_tp1 - nu_t
+
+        lambda_f_div = self.get_lambda()
+
+        state_action_ratio = f_derivative_inverse(e / lambda_f_div, self.f_div)
+        state_action_ratio = torch.nn.functional.relu(state_action_ratio)
+        w = state_action_ratio.detach()
+        
+        # w = w / (w.mean() + 1e-8)
+        policy_loss = -(w * log_probs).mean()
+        return policy_loss, w
+
+
+
+    # Training step
+    def train_step(self, batch):
+        states         = batch["states"].to(self.device)
+        next_states    = batch["next_states"].to(self.device)
+        actions        = batch["actions"].to(self.device)
+        rewards        = batch["rewards"].to(self.device)
+        timesteps      = batch["timesteps"].to(self.device)
+        next_timesteps = batch["next_timesteps"].to(self.device)
+        initial_states    = batch["initial_states"].to(self.device)
+
+        # Update ν and μ
+        self.nu_optim.zero_grad()
+        if self.mu_optim is not None:
+            self.mu_optim.zero_grad()
+
+        nu_loss, (e, nu_grad_penalty, init_loss, advantage_loss, util_loss,
+                  nu_vals_mean, next_nu_mean, f_vals_mean) = self.nu_loss_fn(
+            states, next_states, timesteps, next_timesteps, rewards, initial_states
+        )
+        nu_loss.backward()
+        self.nu_optim.step()
+        if self.mu_optim is not None:
+            self.mu_optim.step()
+        self.nu_scheduler.step()
+
+        # Update λ (f-divergence constraint)
+        # self._update_lambda(f_vals_mean)
+        if not self.config.use_fixed_lambda:
+            current_lambda_f_div = self.get_lambda()
+            lambda_loss = current_lambda_f_div * (self.f_div_threshold - f_vals_mean.detach())
+            self.lambda_optim.zero_grad()
+            lambda_loss.backward()
+            self.lambda_optim.step()
+            self.lambda_scheduler.step()
+
+        # Update policy
+        self.policy_optim.zero_grad()
+        policy_loss, w = self.policy_loss_fn(
+            states, actions, rewards, next_states
         )
         policy_loss.backward()
         self.policy_optim.step()
