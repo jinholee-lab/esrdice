@@ -264,7 +264,7 @@ def main():
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
-    parser.add_argument("--wandb_project", type=str, default="AET_v1115")
+    parser.add_argument("--wandb_project", type=str, default="AET")
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
@@ -370,13 +370,14 @@ def main():
     if config.mode == "AET":
         run_name += f"_fair_alpha{config.fair_alpha}"
     run_name += f"_seed{config.seed}"
-
+    tag_name = [config.tag] if isinstance(config.tag, str) else config.tag
     if config.use_wandb:
         wandb.init(
             project=config.wandb_project,
             config=vars(config),
             name=run_name,
-            entity = 'wsk208'
+            entity = 'wsk208',
+            tags = tag_name
         )
     
         
