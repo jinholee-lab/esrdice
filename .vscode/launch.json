@@ -1,53 +1,53 @@
-{
-    // VS Code debug setting
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Python Debugger: Train Fair Taxi",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "env": {
-                "CUDA_VISIBLE_DEVICES": "0"
-            },
-            "args": [
-                "--seed", "42",
-                "--device", "cuda",
-                "--num_steps", "200000",
-                "--log_interval", "1000",
-                "--batch_size", "256",
-                "--horizon", "100",
-                "--fuel", "100",
-                "--dataset_path", "./data/bus_v2.npy",
-                "--reward_dim", "2",
-                "--f_divergence", "Chi",
-                "--hidden_dims", "256", "256", "256",
-                "--alpha", "0.00001",
-                "--nu_lr", "3e-4",
-                "--policy_lr", "3e-4",
-                "--mu_lr", "3e-4",
-                "--nu_grad_penalty_coeff", "0.0",
-                "--normalization_method", "linear",
-                "--num_eval_episodes", "100",
-                "--utility_kind", "alpha_fairness",
-                "--fair_alpha", "0.0",
-                "--concat_acc_reward", "True",
-                "--one_hot_xy", "True",
-                "--one_hot_pass_idx", "True",
-                "--lambda_lr", "3e-4",
-                // "--mode", "AET",
-                "--mode", "AET_constraint",
-                "--policy_rollout", "stochastic",
-                "--tag", "AET_test_constraint",
-                "--f_divergence_threshold", "8e4",
-                // "--use_fixed_lambda", "True",
-                "--use_wandb", "True",
-            ]
-        }
-    ]
-}
+// {
+//     // VS Code debug setting
+//     "version": "0.2.0",
+//     "configurations": [
+//         {
+//             "name": "Python Debugger: Train Fair Taxi",
+//             "type": "debugpy",
+//             "request": "launch",
+//             "program": "${workspaceFolder}/main.py",
+//             "console": "integratedTerminal",
+//             "justMyCode": true,
+//             "env": {
+//                 "CUDA_VISIBLE_DEVICES": "0"
+//             },
+//             "args": [
+//                 "--seed", "42",
+//                 "--device", "cuda",
+//                 "--num_steps", "200000",
+//                 "--log_interval", "1000",
+//                 "--batch_size", "256",
+//                 "--horizon", "100",
+//                 "--fuel", "100",
+//                 "--dataset_path", "./data/bus_v2.npy",
+//                 "--reward_dim", "2",
+//                 "--f_divergence", "Chi",
+//                 "--hidden_dims", "256", "256", "256",
+//                 "--alpha", "0.00001",
+//                 "--nu_lr", "3e-4",
+//                 "--policy_lr", "3e-4",
+//                 "--mu_lr", "3e-4",
+//                 "--nu_grad_penalty_coeff", "0.0",
+//                 "--normalization_method", "linear",
+//                 "--num_eval_episodes", "100",
+//                 "--utility_kind", "alpha_fairness",
+//                 "--fair_alpha", "0.0",
+//                 "--concat_acc_reward", "True",
+//                 "--one_hot_xy", "True",
+//                 "--one_hot_pass_idx", "True",
+//                 "--lambda_lr", "3e-4",
+//                 // "--mode", "AET",
+//                 "--mode", "AET_constraint",
+//                 "--policy_rollout", "stochastic",
+//                 "--tag", "AET_test_constraint",
+//                 "--f_divergence_threshold", "8e4",
+//                 // "--use_fixed_lambda", "True",
+//                 "--use_wandb", "True",
+//             ]
+//         }
+//     ]
+// }
 
 // {
 //     "version": "0.2.0",
@@ -65,3 +65,23 @@
 //         }
 //     ]
 // }
+
+
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Fair Maze",
+            "type": "python",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/fair_maze",
+            "program": "run_fair_antmaze.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            // "args": [
+            //     "--maze", "hardest-maze",
+            //     "--policy_file", "${workspaceFolder}/temp/locomotion/ant_hierarch_pol.pkl"
+            // ]
+        }
+    ]
+}

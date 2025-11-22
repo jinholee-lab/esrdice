@@ -105,8 +105,10 @@ class Fair_Taxi_MDP_Penalty_V2(gym.Env):
         state : int
             A given state encoded as an unique integer
         """
-        super().reset(seed=seed)
-        
+        # super().reset(seed=seed)
+        if seed is not None:
+            self.np_random, _ = gym.utils.seeding.np_random(seed)
+            
         if taxi_loc == None and pass_loc == None and pass_dest == None:   # when no parameters
             self.taxi_loc = self.np_random.integers(0, self.size, size=2)   # random taxi spawn location
             self.pass_loc = 0   # passenger out of taxi

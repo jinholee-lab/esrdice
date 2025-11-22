@@ -9,3 +9,5 @@ wandb/
 FairMORL/
 *.sh
 *.ipynb
+rlkit-offline-rl-benchmark
+vis
