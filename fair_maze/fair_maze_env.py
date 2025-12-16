@@ -565,9 +565,9 @@ class FairMazeEnv(gym.Env):
             goal_x = waypoint_x - robot_x
             goal_y = waypoint_y - robot_y          
             
-            print(f'Robot: (row, col)=({robot_row}, {robot_col}) : (x, y) ({robot_x}, {robot_y})')
-            print(f'Waypoint: (row, col)=({waypoint_row}, {waypoint_col}) : (x, y) ({waypoint_x}, {waypoint_y})')
-            print(f'Target: (row, col)=({target_row}, {target_col}) : (x, y) ({target_x}, {target_y})')
+            # print(f'Robot: (row, col)=({robot_row}, {robot_col}) : (x, y) ({robot_x}, {robot_y})')
+            # print(f'Waypoint: (row, col)=({waypoint_row}, {waypoint_col}) : (x, y) ({waypoint_x}, {waypoint_y})')
+            # print(f'Target: (row, col)=({target_row}, {target_col}) : (x, y) ({target_x}, {target_y})')
             
             return low_level_policy_fn(obs, (goal_x, goal_y))
            

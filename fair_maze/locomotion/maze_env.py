@@ -370,7 +370,7 @@ class MazeEnv(gym.Env):
       goal_x = waypoint_x - robot_x
       goal_y = waypoint_y - robot_y
 
-      print ('Waypoint: ', waypoint_row, waypoint_col, waypoint_x, waypoint_y)
+      # print ('Waypoint: ', waypoint_row, waypoint_col, waypoint_x, waypoint_y)
 
       return goal_reaching_policy_fn(obs, (goal_x, goal_y))
 

@@ -89,7 +89,6 @@ def run_episode(env, navigation_policy, max_steps=1000, save_path="./vis/test.gi
 
 def main():
     
-    
     env = NormalizedBoxEnv(
             FairAntMaze(
                 maze_map=fair_maze_map,
