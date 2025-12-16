@@ -268,7 +268,7 @@ def main():
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
-    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET", "AET_constraint", "AET_constraint_vector"])
+    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET", "AET_constraint", "AET_constraint_vector", "AET_double"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
     args = parser.parse_args()
@@ -277,7 +277,7 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
-    if config.mode == "AET" or config.mode == "AET_constraint" or config.mode == "AET_constraint_vector":
+    if config.mode == "AET" or config.mode == "AET_constraint" or config.mode == "AET_constraint_vector"or config.mode == "AET_double":
         keep_dims = True
     else:
         keep_dims = False
@@ -359,6 +359,10 @@ def main():
         print("Initiating vector form version...")
         from AET_constraint import FiniteAET_vector
         agent = FiniteAET_vector(config, device=config.device)
+    elif config.mode == "AET_double":
+        print("Initiating double...")
+        from AET_double import FiniteAET_double
+        agent = FiniteAET_double(config, device=config.device)
     else:
         raise ValueError("Invalid mode. Choose 'esr' or 'ser'.")
     
@@ -392,7 +396,7 @@ def main():
             if step % log_interval == 0:
                 print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k,v in stats.items()]))
                 
-                if vector_mode != "AET_constraint_vector":
+                if vector_mode != "on":
                     eval_results = evaluate_policy(
                         env,
                         agent,
@@ -449,7 +453,7 @@ def main():
         num_steps= config.num_steps,
         batch_size= config.batch_size,
         log_interval=config.log_interval,
-        vector_mode = config.mode
+        vector_mode = "on"
     )
     if config.use_wandb:
         wandb.finish()
