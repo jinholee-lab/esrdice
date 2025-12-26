@@ -20,6 +20,7 @@ class FiniteAET_filter(nn.Module):
         self.f_div = config.f_divergence
         self.filter_threshold = filter_threshold
         self.filter_f_div_threshold = config.f_divergence_filter
+        self.fair_alpha = config.fair_alpha
 
         self.ser_utility = Utility(
             kind=config.utility_kind,
@@ -60,7 +61,10 @@ class FiniteAET_filter(nn.Module):
         # Multipliers 얻기
         beta = torch.exp(self.log_lambda_f_div)
         lambda_sat = torch.sigmoid(self.logit_lambda_sat)
-        mu = self.mu() # [reward_dim]
+        if self.fair_alpha != 0.0:
+            mu = self.mu() # [reward_dim]
+        else:
+            mu = lambda_sat * self.mu()
 
         # Bellman Flow 관련 계산
         nu_curr = self.nu(states)
@@ -237,6 +241,7 @@ class FiniteAET_after(nn.Module):
         self.H = config.horizon
         self.f_div = config.f_divergence
         self.f_div_threshold = config.f_divergence_threshold
+        self.fair_alpha = config.fair_alpha
 
         self.ser_utility = Utility(
             kind=config.utility_kind,
@@ -246,6 +251,7 @@ class FiniteAET_after(nn.Module):
         self.nu_filter = CriticTimeVector(config.state_dim, config.hidden_dims, config.horizon, config.layer_norm).to(device)
         self.mu_filter = MuNetwork(config, learnable=(config.fair_alpha != 0.0)).to(device)
         self.log_lambda_f_div_filter = nn.Parameter(torch.tensor(0.0).to(device))
+        self.logit_lambda_sat_filter = nn.Parameter(torch.tensor(0.0).to(device))
 
         checkpoint = torch.load(filter_path, map_location=self.device)
         
@@ -253,7 +259,8 @@ class FiniteAET_after(nn.Module):
         name_map = {
             'nu': 'nu_filter',
             'mu': 'mu_filter',
-            'log_lambda_f_div': 'log_lambda_f_div_filter'
+            'log_lambda_f_div': 'log_lambda_f_div_filter',
+            'logit_lambda_sat': 'logit_lambda_sat_filter'
         }
         
         new_state_dict = self.state_dict()
@@ -310,13 +317,18 @@ class FiniteAET_after(nn.Module):
     
     def update_nu_mu(self, states, next_states, timesteps, rewards, initial_states):
         lambda_f_div_filter = torch.exp(self.log_lambda_f_div_filter)
+        logit_lambda_sat_filter = torch.exp(self.log_lambda_f_div_filter)
         
         nu_curr = self.nu_filter(states)
         nu_next = self.nu_filter(next_states)
         nu_t   = nu_curr[:, :-1]
         nu_tp1 = nu_next[:,  1:]
         
-        mu_1 = self.mu_filter()  # [R]
+        if self.fair_alpha != 0.0:
+            mu_1 = self.mu_filter() # [reward_dim]
+        else:
+            mu_1 = logit_lambda_sat_filter * self.mu_filter()
+        
         scalar = (rewards @ mu_1)
         e_nonflat      = scalar[:, None] + nu_tp1 - nu_t    # [B]
         e = e_nonflat.reshape(-1)
