@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from utility import Utility
-from utils import Utility as Vector_Utility
+from utils import Utility_np as Vector_Utility
 
 def evaluate_policy(
     env,

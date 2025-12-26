@@ -10,6 +10,23 @@ from torch.distributions import Categorical
 # -----------------
 # Critic(s,t): ν(s,t)
 # -----------------
+class MuNetwork(nn.Module):
+    def __init__(self, config, learnable=True):
+        super().__init__()
+        self.learnable = learnable
+        if self.learnable:
+            self.theta = nn.Parameter(torch.full((config.reward_dim,), 1.0))
+            self.register_buffer("mu_constant", None)
+        else:
+            self.theta = None
+            self.register_buffer("mu_constant", torch.full((config.reward_dim,), 1.0))
+            
+    def forward(self):
+        if self.learnable:
+            return F.softplus(self.theta)
+        else:
+            return self.mu_constant    
+
 class CriticTime(nn.Module):
     def __init__(self, state_dim, hidden_dims, horizon, time_embed_dim=8, layer_norm=False):
         super().__init__()
@@ -76,8 +93,6 @@ class CriticTimeVector(nn.Module):
         t = timesteps.squeeze(-1).long().clamp(min=0, max=self.horizon)  # [B]
         return out.gather(1, t.unsqueeze(1)).squeeze(1)                  # [B]
 
-
-
 class DiscretePolicy(nn.Module):
     def __init__(self, state_dim, hidden_dims, action_dim, horizon, time_embed_dim=8):
         super().__init__()
@@ -95,7 +110,6 @@ class DiscretePolicy(nn.Module):
         x = torch.cat([states, emb], dim=-1)
         logits = self.logits(self.mlp(x))
         return Categorical(logits=logits)
-
 
 class DiscretePolicyMultiHead(nn.Module):
     """

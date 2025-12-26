@@ -39,7 +39,7 @@ def get_setting(size, num_locs):
 
 EPS = 1e-12
 
-class Utility:
+class Utility_np:
     """
     Utility function for multi-objective RL
     kind: "linear" | "log" | "piecewise_log"
