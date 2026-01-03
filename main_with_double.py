@@ -1,24 +1,23 @@
+# main_with_double.py (updated for FiniteAET_double with policy_1 / policy_2)
+# Minimal changes:
+#  - call evaluate_policy_vector(..., policy_name="policy_1"/"policy_2")
+#  - log eval results separately (eval_p1/*, eval_p2/*) for clarity
+
 import argparse
-import json
 import os
+
 import numpy as np
 import torch
 
-from enum import Enum
-from pathlib import Path
-from utils import get_setting
-from buffer import ReplayBuffer
-from AET_filter import FiniteAET_postfilter, FiniteAET_after
-from AET_double import FiniteAET_double
-from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
-from evaluate import evaluate_policy_vector
-from divergence import FDivergence
-from utility import Utility
-from utils import Utility_np
-
 import wandb
-import argparse 
-import numpy as np
+from AET_double import FiniteAET_double
+from buffer import ReplayBuffer
+from divergence import FDivergence
+from evaluate import evaluate_policy_vector
+from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
+from utility import Utility
+from utils import get_setting
+
 
 def preprocess_timesteps(dataset):
     timesteps = dataset["timesteps"].astype(np.int64)  # [N]
@@ -28,6 +27,7 @@ def preprocess_timesteps(dataset):
     new_dataset["next_timesteps"] = next_timesteps
     return new_dataset
 
+
 def preprocess_rewards(dataset, method="linear"):
     """
     dataset: dict, includes 'rewards' key with shape [N, D]
@@ -35,56 +35,43 @@ def preprocess_rewards(dataset, method="linear"):
     """
     new_dataset = dataset.copy()
     if "rewards" not in dataset:
-        raise KeyError(f"rewards is not in dataset")
+        raise KeyError("rewards is not in dataset")
 
     arr = dataset["rewards"]
     stat_dict = {}
-    
+
     if method == "linear":
-        # get max value from entire dataset, since the env reward design is same for all dimensions
-        max_val = arr.max() 
+        max_val = arr.max()
         if max_val > 0:
             new_dataset["rewards"] = arr / max_val
         else:
             raise ValueError("max reward is non-positive, please check the dataset")
-        stat_dict["rewards"] = {"max" : max_val}
+        stat_dict["rewards"] = {"max": max_val}
     elif method == "zscore":
         mean = arr.mean()
         std = arr.std()
         if std > 0:
             new_dataset["rewards"] = (arr - mean) / std
         else:
-            new_dataset["rewards"] = arr 
-        stat_dict["rewards"] = {"mean" : mean,
-                                "std" : std}
+            new_dataset["rewards"] = arr
+        stat_dict["rewards"] = {"mean": mean, "std": std}
     elif method == "minmax":
         min_val = arr.min()
         max_val = arr.max()
         if max_val > min_val:
             new_dataset["rewards"] = (arr - min_val) / (max_val - min_val)
         else:
-            new_dataset["rewards"] = arr  # 값이 모두 같으면 그대로 둠
-        stat_dict["rewards"] = {"max" : max_val,
-                                "min" : min_val}
+            new_dataset["rewards"] = arr
+        stat_dict["rewards"] = {"max": max_val, "min": min_val}
     else:
-        # no normalization
         new_dataset["rewards"] = arr
-        max_val = arr.max() 
-        stat_dict["rewards"] = {"max" : max_val}
+        max_val = arr.max()
+        stat_dict["rewards"] = {"max": max_val}
 
     return new_dataset, stat_dict
 
+
 def preprocess_Raccs(dataset, horizon):
-    """
-    rewards를 누적해 Raccs, next_Raccs를 만들어 dataset에 추가
-    
-    Args:
-      dataset: dict, 반드시 'rewards' [N, D], 'timesteps' [N] 포함
-      horizon: 에피소드 길이 (fixed horizon)
-      
-    Returns:
-      new_dataset: 원본 dataset + 'Raccs', 'next_Raccs' 추가
-    """
     rewards = dataset["rewards"]  # [N, D]
     N, D = rewards.shape
 
@@ -93,14 +80,13 @@ def preprocess_Raccs(dataset, horizon):
 
     final_Raccs_list = []
 
-    # trajectory 단위로 처리 (timesteps가 0~horizon-1로 반복된다고 가정)
     for start in range(0, N, horizon):
         acc = np.zeros(D, dtype=np.float32)
         for t in range(horizon):
             idx = start + t
-            Raccs[idx] = acc                  # R_acc,t
-            acc = acc + rewards[idx]          # update
-            next_Raccs[idx] = acc             # R_acc,t+1
+            Raccs[idx] = acc
+            acc = acc + rewards[idx]
+            next_Raccs[idx] = acc
         final_Raccs_list.append(acc.copy())
     final_Raccs_array = np.array(final_Raccs_list)
 
@@ -109,6 +95,7 @@ def preprocess_Raccs(dataset, horizon):
     new_dataset["next_Raccs"] = next_Raccs
     return new_dataset, final_Raccs_array
 
+
 def preprocess_states(
     dataset,
     env,
@@ -116,27 +103,12 @@ def preprocess_states(
     one_hot_pass_idx=True,
     concat_raccs=True,
 ):
-    """
-    dataset: dict, keys 포함
-      - 'states', 'next_states', 'initial_states' : [N] int codes
-      - 'Raccs' : [N, D] (optional, concat_raccs=True일 때 필요)
-    env: Taxi environment (decode() 지원)
-    
-    옵션:
-      one_hot_xy   : taxi (x,y)를 one-hot 인코딩할지 여부
-      one_hot_pass : passenger 상태를 one-hot 인코딩할지 여부
-      concat_raccs : Raccs를 feature에 붙일지 여부
-    
-    return: new_dataset with processed states
-    """
-
     def decode_and_feat(states, raccs=None):
         decoded = np.array([env.decode(s) for s in states])  # (N,4)
         taxi_x, taxi_y, pass_loc, pass_idx = decoded.T
 
         feats = []
 
-        # --- Taxi 위치 ---
         if one_hot_xy:
             taxi_x_oh = np.eye(env.size)[taxi_x]
             taxi_y_oh = np.eye(env.size)[taxi_y]
@@ -146,9 +118,6 @@ def preprocess_states(
             feats.append(taxi_x[:, None])
             feats.append(taxi_y[:, None])
 
-        # --- Passenger 상태 ---
-        
-        # pass_loc: binary (0: no one in taxi, 1: in taxi)
         feats.append(pass_loc[:, None])
 
         if one_hot_pass_idx:
@@ -159,59 +128,50 @@ def preprocess_states(
 
         feats = np.concatenate(feats, axis=1)
 
-        # --- Raccs 붙이기 ---
         if concat_raccs and raccs is not None:
             feats = np.concatenate([feats, raccs], axis=1)
 
         return feats
 
-    # ---- dataset의 세 가지 state 전처리 ----
     new_dataset = dataset.copy()
-    new_dataset['states'] = decode_and_feat(dataset["states"], dataset.get("Raccs"))
-    new_dataset['next_states'] = decode_and_feat(dataset["next_states"], dataset.get("next_Raccs"))
-    new_dataset['initial_states'] = decode_and_feat(dataset["initial_states"], np.zeros_like(dataset['Raccs']))  # init은 raccs 0으로 채워도 무방
+    new_dataset["states"] = decode_and_feat(dataset["states"], dataset.get("Raccs"))
+    new_dataset["next_states"] = decode_and_feat(dataset["next_states"], dataset.get("next_Raccs"))
+    new_dataset["initial_states"] = decode_and_feat(
+        dataset["initial_states"], np.zeros_like(dataset["Raccs"])
+    )
 
     return new_dataset
 
-def preprocess_scalarization(dataset, utility, keep_dims=False, horizon=100, add_u0_to="first"):
-    """
-    ESR step-wise 보상을 계산하고, 에피소드당 한 번 u(0)를 더해
-    총합이 정확히 u(R_T)와 일치하도록 보정합니다.
-    """
-    Raccs   = dataset["Raccs"]      # [N, D]
-    rewards = dataset["rewards"]    # [N, D]
-    N, D    = rewards.shape
 
-    # 1) ESR: u(R_{t+1}) - u(R_t)
+def preprocess_scalarization(dataset, utility, keep_dims=False, horizon=100, add_u0_to="first"):
+    Raccs = dataset["Raccs"]
+    rewards = dataset["rewards"]
+    N, D = rewards.shape
+
     esr = utility(Raccs + rewards, keep_dims=keep_dims) - utility(Raccs, keep_dims=keep_dims)
- 
-    # 2) 에피소드 보정: 한 번만 u(0) 더하기 (합 == u(R_T))
+
     if horizon is not None:
         if N % horizon != 0:
-            raise ValueError(f"N={N} is not a multiple of horizon={horizon}. "
-                             "Use timesteps-based correction instead.")
+            raise ValueError(f"N={N} is not a multiple of horizon={horizon}.")
 
-        # u(0) 계산 (keep_dims에 따라 스칼라 또는 (D,))
         if keep_dims:
-            u0 = utility(np.zeros((1, D), dtype=np.float32), keep_dims=True)[0]   # shape (D,)
+            u0 = utility(np.zeros((1, D), dtype=np.float32), keep_dims=True)[0]
         else:
-            u0 = utility(np.zeros((1, D), dtype=np.float32), keep_dims=False)[0]  # scalar
+            u0 = utility(np.zeros((1, D), dtype=np.float32), keep_dims=False)[0]
 
         if add_u0_to == "first":
-            # 각 에피소드의 첫 스텝 인덱스: 0, H, 2H, ...
             idx = np.arange(0, N, horizon)
         elif add_u0_to == "last":
-            # 각 에피소드의 마지막 스텝 인덱스: H-1, 2H-1, ...
-            idx = np.arange(horizon-1, N, horizon)
+            idx = np.arange(horizon - 1, N, horizon)
         else:
             raise ValueError("add_u0_to must be 'first' or 'last'.")
 
-        esr[idx] += u0  # 브로드캐스팅으로 (N,) 또는 (N,D) 모두 안전
+        esr[idx] += u0
 
-    # 3) dataset 업데이트
     new_dataset = dict(dataset)
     new_dataset["rewards"] = esr.astype(np.float32, copy=False)
     return new_dataset
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -240,13 +200,12 @@ def main():
     parser.add_argument("--policy_lr", type=float, default=3e-4)
     parser.add_argument("--nu_lr", type=float, default=3e-4)
     parser.add_argument("--mu_lr", type=float, default=3e-4)
-    parser.add_argument("--f_divergence", type=str, default="Chi",
-                        choices=[d.value for d in FDivergence])
+    parser.add_argument("--f_divergence", type=str, default="Chi", choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
     parser.add_argument("--fair_alpha", type=float, default=1.0)
     parser.add_argument("--lambda_1", type=float, default=None)
     parser.add_argument("--lambda_2", type=float, default=None)
-    
+
     # ---- path ----
     parser.add_argument("--save_path", type=str, default="./checkpoints/")
 
@@ -255,14 +214,19 @@ def main():
     parser.add_argument("--one_hot_xy", type=bool, default=False)
     parser.add_argument("--one_hot_pass_idx", type=bool, default=False)
     parser.add_argument("--concat_acc_reward", type=bool, default=False)
-    parser.add_argument("--normalization_method", type=str, default="linear", choices=["zscore", "minmax", "linear", "none"])
+    parser.add_argument(
+        "--normalization_method",
+        type=str,
+        default="linear",
+        choices=["zscore", "minmax", "linear", "none"],
+    )
     parser.add_argument("--use_augmentation", type=bool, default=True)
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
     parser.add_argument("--wandb_project", type=str, default="AET")
     parser.add_argument("--tag", type=str, default="test")
-    
+
     # ---- mode ----
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
@@ -271,9 +235,9 @@ def main():
     config = args
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
-    
-    keep_dims = True # Vector-form Actor / Critic
-        
+
+    keep_dims = True  # Vector-form Actor / Critic
+
     # ---- Env init ----
     config.size, config.loc_coords, config.dest_coords = get_setting(args.size, args.reward_dim)
 
@@ -282,42 +246,31 @@ def main():
         loc_coords=config.loc_coords,
         dest_coords=config.dest_coords,
         fuel=config.fuel,
-        output_path=config.output_path
+        output_path=config.output_path,
     )
 
     # ---- Load dataset ----
     dataset = np.load(config.dataset_path, allow_pickle=True).item()
-    
-    # ---- Preprocess timesteps ----
+
     dataset = preprocess_timesteps(dataset)
-
-    # ---- Preprocess rewards ----
     dataset, norm_stats = preprocess_rewards(dataset, method=config.normalization_method)
-    
-    # ---- Preprocess Raccs ----
     dataset, final_Raccs_array = preprocess_Raccs(dataset, horizon=config.horizon)
-    
-    #_ = compute_best_threshold(final_Raccs_array, config)
-    # ---- Preprocess scalarization ----
-    esr_utility = Utility(
-        kind=config.utility_kind,
-        alpha=1 - config.fair_alpha
-        )
 
-    # ---- Preprocess states ----
+    esr_utility = Utility(kind=config.utility_kind, alpha=1 - config.fair_alpha)
+
     dataset = preprocess_states(
         dataset,
         env,
         one_hot_xy=config.one_hot_xy,
         one_hot_pass_idx=config.one_hot_pass_idx,
-        concat_raccs=config.concat_acc_reward, # Raccs
+        concat_raccs=config.concat_acc_reward,
     )
-    
+
     config.state_dim = dataset["states"].shape[1] + (config.reward_dim if not config.concat_acc_reward else 0)
     config.action_dim = env.action_space.n
-    config.reward_dim = dataset["rewards"].shape[1]  # reward dim (D)
+    config.reward_dim = dataset["rewards"].shape[1]
     print(f"State dim: {config.state_dim}, Action dim: {config.action_dim}, Reward dim: {config.reward_dim}")
-    
+
     # ---- Replay Buffer ----
     buffer = ReplayBuffer(
         device=config.device,
@@ -325,57 +278,61 @@ def main():
         horizon=config.horizon,
         keep_dims=keep_dims,
         reward_dim=config.reward_dim,
-        use_augmentation=config.use_augmentation
+        use_augmentation=config.use_augmentation,
     )
     buffer.load_dataset(dataset)
-    
+
     # ---- Initialize DICE ----
     config.f_divergence = FDivergence(config.f_divergence)
-    
+
     print("✅ Environment and agent initialized.")
     print("Config:", config)
 
     def trainer(agent, buffer, num_steps=10000, batch_size=256, log_interval=100):
-    # stats_history = []
-
         for step in range(1, num_steps + 1):
             batch = buffer.sample(batch_size)
             stats = agent.train_step(batch)
-            
-            if step % log_interval == 0:
-                print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k,v in stats.items()]))
 
-                #print("Initiating Evalaution on vector policy")
-                eval_results = evaluate_policy_vector(
+            if step % log_interval == 0:
+                print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k, v in stats.items()]))
+
+                # Evaluate BOTH policies
+                eval_p1 = evaluate_policy_vector(
                     env,
                     agent,
+                    policy_name="policy_1",
                     num_episodes=config.num_eval_episodes,
                     config=config,
                     max_steps=config.horizon,
                     normalization_method=config.normalization_method,
                     norm_stats=norm_stats,
-                    # utility=utility,
                 )
-                
+
+                eval_p2 = evaluate_policy_vector(
+                    env,
+                    agent,
+                    policy_name="policy_2",
+                    num_episodes=config.num_eval_episodes,
+                    config=config,
+                    max_steps=config.horizon,
+                    normalization_method=config.normalization_method,
+                    norm_stats=norm_stats,
+                )
+
                 if config.use_wandb:
                     wandb.log({"train/" + k: v for k, v in stats.items()}, step=step)
-                    wandb.log({
-                        "eval/linear_scalarized_return": eval_results["linear_scalarized_return"],
-                        "eval/expected_scalarized_return_piecewise_log": eval_results["expected_scalarized_return_piecewise_log"],
-                        "eval/scalarized_expected_return_piecewise_log": eval_results["scalarized_expected_return_piecewise_log"],
-                        "eval/primary_objective": eval_results["primary_objective"],
-                    }, step=step)
 
-                    # log the individual dimensions of the expected return vector
-                    expected_return_vector = eval_results["expected_return_vector"]
-                    return_vector_log_data = {
-                        f"eval/expected_return_vector_{i}": val 
-                        for i, val in enumerate(expected_return_vector)
-                    }
-                    wandb.log(return_vector_log_data, step=step)
+                    wandb.log({f"eval_p1/{k}": v for k, v in eval_p1.items()}, step=step)
+                    wandb.log({f"eval_p2/{k}": v for k, v in eval_p2.items()}, step=step)
+
+                    # log individual dimensions of expected return vector (both policies)
+                    for i, val in enumerate(eval_p1["expected_return_vector"]):
+                        wandb.log({f"eval_p1/expected_return_vector_{i}": float(val)}, step=step)
+
+                    for i, val in enumerate(eval_p2["expected_return_vector"]):
+                        wandb.log({f"eval_p2/expected_return_vector_{i}": float(val)}, step=step)
 
     # ---- wandb logging ----
-
     model_name = f"Postfilter_fair_alpha{config.fair_alpha}"
     model_name += f"_filter{config.lambda_1}"
     model_name += f"_budget{config.lambda_2}"
@@ -384,29 +341,31 @@ def main():
 
     save_model_dir = os.path.join(config.save_path, model_name)
     model_path = os.path.join(save_model_dir, "model.pth")
-    if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project,
-                config=vars(config),
-                name=model_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
 
-    agent = FiniteAET_double(config = config, device=config.device)
+    if config.use_wandb:
+        wandb.init(
+            project=config.wandb_project,
+            config=vars(config),
+            name=model_name,
+            tags=tag_name,
+        )
+
+    agent = FiniteAET_double(config=config, device=config.device)
     trainer(
         agent,
         buffer,
-        num_steps= config.num_steps,
-        batch_size= config.batch_size,
-        log_interval=config.log_interval
-        )
+        num_steps=config.num_steps,
+        batch_size=config.batch_size,
+        log_interval=config.log_interval,
+    )
+
     os.makedirs(save_model_dir, exist_ok=True)
     agent.save(model_path)
     print(f"💾 모델 저장 완료: {model_path}")
-    
+
     if config.use_wandb:
         wandb.finish()
+
 
 if __name__ == "__main__":
     main()
