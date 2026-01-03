@@ -8,7 +8,8 @@ class ReplayBuffer:
                  horizon: int = None,
                  keep_dims: bool = False,
                  reward_dim: int = None,
-                 aug_ratio: float = 0.5
+                 aug_ratio: float = 0.5,
+                 use_augmentation: bool = True
                  ):
         """
         capacity: 최대 저장 용량 (None이면 dataset 크기와 동일)
@@ -22,6 +23,7 @@ class ReplayBuffer:
         self.keep_dims = keep_dims
         self.reward_dim = reward_dim
         self.aug_ratio = aug_ratio
+        self.use_augmentation = use_augmentation
         # Calculate u(0) once and store it (on device)
         u0 = self.utility(
                         torch.zeros(1,self.reward_dim, dtype=torch.float32),
@@ -105,14 +107,18 @@ class ReplayBuffer:
         
         # Augmentation
         #   Raccs and next_Raccs
-        Raccs_indices = torch.randint(0, self.num_unique_Raccs, (batch_size,), device=self.device) 
-        Raccs_aug = self.unique_Raccs[Raccs_indices]
-        Raccs_next_aug = Raccs_aug + original_rewards
-        
-        # mask to decide whether to augment or not
-        augment_mask = (torch.rand(batch_size, device=self.device) < self.aug_ratio).unsqueeze(-1)
-        Raccs_final = torch.where(augment_mask, Raccs_aug, Raccs_original)
-        Raccs_next_final = torch.where(augment_mask, Raccs_next_aug, Raccs_next_original)
+        if self.use_augmentation:
+            Raccs_indices = torch.randint(0, self.num_unique_Raccs, (batch_size,), device=self.device) 
+            Raccs_aug = self.unique_Raccs[Raccs_indices]
+            Raccs_next_aug = Raccs_aug + original_rewards
+            
+            # mask to decide whether to augment or not
+            augment_mask = (torch.rand(batch_size, device=self.device) < self.aug_ratio).unsqueeze(-1)
+            Raccs_final = torch.where(augment_mask, Raccs_aug, Raccs_original)
+            Raccs_next_final = torch.where(augment_mask, Raccs_next_aug, Raccs_next_original)
+        else:
+            Raccs_final = Raccs_original
+            Raccs_next_final = Raccs_next_original
         
         #   timesteps and next_timesteps      
         # timesteps_aug = torch.randint(0, self.horizon, (batch_size,), device=self.device)

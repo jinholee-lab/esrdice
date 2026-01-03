@@ -1,3 +1,5 @@
+
+
 import argparse
 import json
 import os
@@ -8,14 +10,16 @@ from enum import Enum
 from pathlib import Path
 from utils import get_setting
 from buffer import ReplayBuffer
-from AET_filter import FiniteAET_filter, FiniteAET_after, FairDICE, ESRDICE, ESRDICE_after
+from finitedice import FiniteOptiDICE
+from finitefairdice import FiniteFairDICE
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
-from evaluate import evaluate_policy_vector
+from evaluate import evaluate_policy, evaluate_policy_vector
 from divergence import FDivergence
 from utility import Utility
-from utils import Utility_np
-
 import wandb
+
+# ---- import 환경 및 함수 ----
+# from your_module import Fair_Taxi_MDP_Penalty_V2, dataset_to_replaybuffer, FiniteOptiDICE, FDivergence
 
 import argparse 
 import numpy as np
@@ -27,6 +31,7 @@ def preprocess_timesteps(dataset):
     new_dataset = dataset.copy()
     new_dataset["next_timesteps"] = next_timesteps
     return new_dataset
+
 
 def preprocess_rewards(dataset, method="linear"):
     """
@@ -74,6 +79,7 @@ def preprocess_rewards(dataset, method="linear"):
 
     return new_dataset, stat_dict
 
+
 def preprocess_Raccs(dataset, horizon):
     """
     rewards를 누적해 Raccs, next_Raccs를 만들어 dataset에 추가
@@ -91,8 +97,6 @@ def preprocess_Raccs(dataset, horizon):
     Raccs = np.zeros((N, D), dtype=np.float32)
     next_Raccs = np.zeros((N, D), dtype=np.float32)
 
-    final_Raccs_list = []
-
     # trajectory 단위로 처리 (timesteps가 0~horizon-1로 반복된다고 가정)
     for start in range(0, N, horizon):
         acc = np.zeros(D, dtype=np.float32)
@@ -101,45 +105,11 @@ def preprocess_Raccs(dataset, horizon):
             Raccs[idx] = acc                  # R_acc,t
             acc = acc + rewards[idx]          # update
             next_Raccs[idx] = acc             # R_acc,t+1
-        final_Raccs_list.append(acc.copy())
-    final_Raccs_array = np.array(final_Raccs_list)
 
     new_dataset = dataset.copy()
     new_dataset["Raccs"] = Raccs
     new_dataset["next_Raccs"] = next_Raccs
-    return new_dataset, final_Raccs_array
-
-def compute_filter_threshold(final_Raccs_array, config):
-    inner_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha=1 - config.fair_alpha
-        )
-    esr_vector = inner_utility(final_Raccs_array, True)
-    expected_esr = np.mean(esr_vector,axis=0)
-    outer_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha= config.fair_alpha
-        )
-    final_ser = outer_utility(expected_esr, False)
-    return final_ser
-
-def compute_best_threshold(final_Raccs_array, config):
-    inner_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha=1 - config.fair_alpha
-        )
-    outer_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha= config.fair_alpha
-        )
-    esr_vector = inner_utility(final_Raccs_array, True)
-    final_ser_list = []
-    for i in esr_vector:
-        final_ser_list.append(outer_utility(i, False))
-    print(final_ser_list)
-    max_ser = np.max(final_ser_list)
-    print(max_ser)
-    return max_ser
+    return new_dataset
 
 def preprocess_states(
     dataset,
@@ -277,9 +247,10 @@ def main():
                         choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
     parser.add_argument("--fair_alpha", type=float, default=1.0)
-    parser.add_argument("--f_divergence_filter", type=float, default=None)
     parser.add_argument("--f_divergence_threshold", type=float, default=None)
+    parser.add_argument("--lambda_lr", type=float, default=3e-4)
     parser.add_argument("--lambda_init", type=float, default=1e-5)
+    parser.add_argument("--use_fixed_lambda", type=bool, default=False)
     
     # ---- path ----
     parser.add_argument("--save_path", type=str, default="./checkpoints/")
@@ -297,7 +268,7 @@ def main():
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
-    parser.add_argument("--mode", type=str, default="AET_filter", choices=["AET_filter", "ESR_filter", "ESR_model"])
+    parser.add_argument("--mode", type=str, default="ser", choices=["esr", "ser","AET", "AET_constraint", "AET_constraint_vector", "AET_double"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
     args = parser.parse_args()
@@ -306,10 +277,10 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
-    #if config.mode == "AET_filter":
-    keep_dims = True
-    #else:
-        #ValueError("Not implemented")
+    if config.mode == "AET" or config.mode == "AET_constraint" or config.mode == "AET_constraint_vector"or config.mode == "AET_double":
+        keep_dims = True
+    else:
+        keep_dims = False
         
     # ---- Env init ----
     config.size, config.loc_coords, config.dest_coords = get_setting(args.size, args.reward_dim)
@@ -332,19 +303,16 @@ def main():
     dataset, norm_stats = preprocess_rewards(dataset, method=config.normalization_method)
     
     # ---- Preprocess Raccs ----
-    dataset, final_Raccs_array = preprocess_Raccs(dataset, horizon=config.horizon)
+    dataset = preprocess_Raccs(dataset, horizon=config.horizon)
     
-    # For filter threshold
-
-    filter_threshold = compute_filter_threshold(final_Raccs_array, config)
-
-    #_ = compute_best_threshold(final_Raccs_array, config)
     # ---- Preprocess scalarization ----
     utility = Utility(
         kind=config.utility_kind,
         alpha=1 - config.fair_alpha
         )
 
+    # dataset = preprocess_scalarization(dataset, utility, keep_dims=keep_dims) # We do this in the buffer now
+    
     # ---- Preprocess states ----
     dataset = preprocess_states(
         dataset,
@@ -356,6 +324,8 @@ def main():
     
     config.state_dim = dataset["states"].shape[1] + (config.reward_dim if not config.concat_acc_reward else 0)
     config.action_dim = env.action_space.n
+    # if config.mode == "esr":
+    #     dataset['rewards'] = dataset['scalarized_rewards']  # ESR 학습을 위해 scalarized reward로 교체
     config.reward_dim = dataset["rewards"].shape[1]  # reward dim (D)
     print(f"State dim: {config.state_dim}, Action dim: {config.action_dim}, Reward dim: {config.reward_dim}")
     
@@ -371,30 +341,52 @@ def main():
     
     # ---- Initialize DICE ----
     config.f_divergence = FDivergence(config.f_divergence)
+
+    if config.mode == "esr":
+        agent = FiniteOptiDICE(config, device=config.device)
+        print("Using FiniteOptiDICE for ESR optimization.")
+    elif config.mode == "ser":
+        agent = FiniteFairDICE(config, device=config.device)
+        print("Using FiniteFairDICE for SER optimization.")
+    elif config.mode == "AET":
+        from AET import FiniteAET
+        agent = FiniteAET(config, device=config.device)
+    elif config.mode == "AET_constraint":
+        from AET_constraint import FiniteAET
+        agent = FiniteAET(config, device=config.device)
+        print("Using FiniteAET for AET_constraint optimization.")
+    elif config.mode == "AET_constraint_vector":
+        print("Initiating vector form version...")
+        from AET_constraint import FiniteAET_vector
+        agent = FiniteAET_vector(config, device=config.device)
+    elif config.mode == "AET_double":
+        print("Initiating double...")
+        from AET_double import FiniteAET_double
+        agent = FiniteAET_double(config, device=config.device)
+    else:
+        raise ValueError("Invalid mode. Choose 'esr' or 'ser'.")
     
     print("✅ Environment and agent initialized.")
     print("Config:", config)
     
     # ---- wandb logging ----
-    filter_name = f"{config.mode}_{config.utility_kind}_{config.f_divergence}"
-    filter_name += f"_fair_alpha{config.fair_alpha}"
-    filter_name += f"_filter{config.f_divergence_filter}"
-    filter_name += f"_seed{config.seed}"
+    run_name = f"{config.mode}_{config.utility_kind}_budget{config.f_divergence_threshold}_{config.f_divergence}"
+    if config.mode == "AET":
+        run_name += f"_fair_alpha{config.fair_alpha}"
+    run_name += f"_seed{config.seed}"
     tag_name = [config.tag] if isinstance(config.tag, str) else config.tag
+    if config.use_wandb:
+        wandb.init(
+            project=config.wandb_project,
+            config=vars(config),
+            name=run_name,
+            entity = 'wsk208',
+            tags = tag_name
+        )
     
-    save_dir = os.path.join(config.save_path, filter_name)
-    filter_path = os.path.join(save_dir, "satisficing_filter.pth")
-
-    model_name = f"{config.mode}_{config.utility_kind}_{config.f_divergence}"
-    model_name += f"_fair_alpha{config.fair_alpha}"
-    model_name += f"_filter{config.f_divergence_filter}"
-    model_name += f"_budget{config.f_divergence_threshold}"
-    model_name += f"_seed{config.seed}"
-
-    save_model_dir = os.path.join(config.save_path, model_name)
-    model_path = os.path.join(save_model_dir, "model.pth")
-
-    def trainer(agent, buffer, num_steps=10000, batch_size=256, log_interval=100):
+        
+    # ---- Training loop ----
+    def train(agent, buffer, num_steps=10000, batch_size=256, log_interval=100, vector_mode = None):
         # stats_history = []
 
         for step in range(1, num_steps + 1):
@@ -403,18 +395,30 @@ def main():
             
             if step % log_interval == 0:
                 print(f"[Step {step}] " + ", ".join([f"{k}: {v:.4f}" for k,v in stats.items()]))
-
-                #print("Initiating Evalaution on vector policy")
-                eval_results = evaluate_policy_vector(
-                    env,
-                    agent,
-                    num_episodes=config.num_eval_episodes,
-                    config=config,
-                    max_steps=config.horizon,
-                    normalization_method=config.normalization_method,
-                    norm_stats=norm_stats,
-                    # utility=utility,
-                )
+                
+                if vector_mode != "on":
+                    eval_results = evaluate_policy(
+                        env,
+                        agent,
+                        num_episodes=config.num_eval_episodes,
+                        config=config,
+                        max_steps=config.horizon,
+                        normalization_method=config.normalization_method,
+                        norm_stats=norm_stats,
+                        # utility=utility,
+                    )
+                else:
+                    #print("Initiating Evalaution on vector policy")
+                    eval_results = evaluate_policy_vector(
+                        env,
+                        agent,
+                        num_episodes=config.num_eval_episodes,
+                        config=config,
+                        max_steps=config.horizon,
+                        normalization_method=config.normalization_method,
+                        norm_stats=norm_stats,
+                        # utility=utility,
+                    )
                 
                 if config.use_wandb:
                     wandb.log({"train/" + k: v for k, v in stats.items()}, step=step)
@@ -437,87 +441,23 @@ def main():
                 # print(" Eval stats:", eval_results)
 
             # stats_history.append(stats)
-    
-    filter_test = False
-    if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project + "_ESR_filter",
-                config=vars(config),
-                name=model_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-    agent = FiniteAET_filter(config = config, filter_threshold = filter_threshold, device=config.device)
-    trainer(
+
+        # Save final model and stats
+        save_dir = os.path.join(config.save_path, run_name)
+        os.makedirs(save_dir, exist_ok=True)
+        agent.save(os.path.join(save_dir, "model.pth"))
+
+    train(
         agent,
         buffer,
         num_steps= config.num_steps,
         batch_size= config.batch_size,
-        log_interval=config.log_interval
-        )
-    os.makedirs(save_dir, exist_ok=True)
-    agent.save(filter_path)
-    print(f"💾 필터 저장 완료: {filter_path}")
-    '''
-    if config.mode == "ESR_filter":
-        print("FairDICE test")
-        if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project + "_ESR_filter",
-                config=vars(config),
-                name=model_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-        print("진입 확인!")
-        agent = ESRDICE(config, device=config.device)
-        trainer(
-            agent,
-            buffer,
-            num_steps= config.num_steps,
-            batch_size= config.batch_size,
-            log_interval=config.log_interval
-            )
-        os.makedirs(save_dir, exist_ok=True)
-        agent.save(filter_path)
-        print(f"💾 필터 저장 완료: {filter_path}")
-    
-    if os.path.exists(filter_path) and not filter_test:
-        print(f"✅ 기존에 학습된 필터를 발견했습니다: {filter_path}")
-        print("Begin!")
-        if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project + "_ESR_model",
-                config=vars(config),
-                name=model_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-        print("진입 확인!")
-        agent = ESRDICE_after(config, filter_path, device=config.device)
-        trainer(
-            agent,
-            buffer,
-            num_steps= config.num_steps,
-            batch_size= config.batch_size,
-            log_interval=config.log_interval
-            )
-        os.makedirs(save_model_dir, exist_ok=True)
-        agent.save(model_path)
-        print(f"💾 모델 저장 완료: {filter_path}")
-    else:
-        print("기존에 학습된 필터가 없습니다 필터 학습을 진행합니다.")
-        if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project,
-                config=vars(config),
-                name=filter_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-    '''    
+        log_interval=config.log_interval,
+        vector_mode = "on"
+    )
     if config.use_wandb:
         wandb.finish()
 
+    
 if __name__ == "__main__":
     main()

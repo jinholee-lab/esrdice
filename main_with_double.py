@@ -8,7 +8,8 @@ from enum import Enum
 from pathlib import Path
 from utils import get_setting
 from buffer import ReplayBuffer
-from AET_filter import FiniteAET_filter, FiniteAET_after, FairDICE, ESRDICE, ESRDICE_after
+from AET_filter import FiniteAET_postfilter, FiniteAET_after
+from AET_double import FiniteAET_double
 from Fair_Taxi_MDP_Penalty_V2 import Fair_Taxi_MDP_Penalty_V2
 from evaluate import evaluate_policy_vector
 from divergence import FDivergence
@@ -16,7 +17,6 @@ from utility import Utility
 from utils import Utility_np
 
 import wandb
-
 import argparse 
 import numpy as np
 
@@ -108,38 +108,6 @@ def preprocess_Raccs(dataset, horizon):
     new_dataset["Raccs"] = Raccs
     new_dataset["next_Raccs"] = next_Raccs
     return new_dataset, final_Raccs_array
-
-def compute_filter_threshold(final_Raccs_array, config):
-    inner_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha=1 - config.fair_alpha
-        )
-    esr_vector = inner_utility(final_Raccs_array, True)
-    expected_esr = np.mean(esr_vector,axis=0)
-    outer_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha= config.fair_alpha
-        )
-    final_ser = outer_utility(expected_esr, False)
-    return final_ser
-
-def compute_best_threshold(final_Raccs_array, config):
-    inner_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha=1 - config.fair_alpha
-        )
-    outer_utility = Utility_np(
-        kind=config.utility_kind,
-        alpha= config.fair_alpha
-        )
-    esr_vector = inner_utility(final_Raccs_array, True)
-    final_ser_list = []
-    for i in esr_vector:
-        final_ser_list.append(outer_utility(i, False))
-    print(final_ser_list)
-    max_ser = np.max(final_ser_list)
-    print(max_ser)
-    return max_ser
 
 def preprocess_states(
     dataset,
@@ -245,7 +213,6 @@ def preprocess_scalarization(dataset, utility, keep_dims=False, horizon=100, add
     new_dataset["rewards"] = esr.astype(np.float32, copy=False)
     return new_dataset
 
-
 def main():
     parser = argparse.ArgumentParser()
 
@@ -277,9 +244,8 @@ def main():
                         choices=[d.value for d in FDivergence])
     parser.add_argument("--nu_grad_penalty_coeff", type=float, default=0.001)
     parser.add_argument("--fair_alpha", type=float, default=1.0)
-    parser.add_argument("--f_divergence_filter", type=float, default=None)
-    parser.add_argument("--f_divergence_threshold", type=float, default=None)
-    parser.add_argument("--lambda_init", type=float, default=1e-5)
+    parser.add_argument("--lambda_1", type=float, default=None)
+    parser.add_argument("--lambda_2", type=float, default=None)
     
     # ---- path ----
     parser.add_argument("--save_path", type=str, default="./checkpoints/")
@@ -290,6 +256,7 @@ def main():
     parser.add_argument("--one_hot_pass_idx", type=bool, default=False)
     parser.add_argument("--concat_acc_reward", type=bool, default=False)
     parser.add_argument("--normalization_method", type=str, default="linear", choices=["zscore", "minmax", "linear", "none"])
+    parser.add_argument("--use_augmentation", type=bool, default=True)
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
@@ -297,7 +264,6 @@ def main():
     parser.add_argument("--tag", type=str, default="test")
     
     # ---- mode ----
-    parser.add_argument("--mode", type=str, default="AET_filter", choices=["AET_filter", "ESR_filter", "ESR_model"])
     parser.add_argument("--policy_rollout", type=str, default="deterministic", choices=["stochastic", "deterministic"])
 
     args = parser.parse_args()
@@ -306,10 +272,7 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
-    #if config.mode == "AET_filter":
-    keep_dims = True
-    #else:
-        #ValueError("Not implemented")
+    keep_dims = True # Vector-form Actor / Critic
         
     # ---- Env init ----
     config.size, config.loc_coords, config.dest_coords = get_setting(args.size, args.reward_dim)
@@ -334,13 +297,9 @@ def main():
     # ---- Preprocess Raccs ----
     dataset, final_Raccs_array = preprocess_Raccs(dataset, horizon=config.horizon)
     
-    # For filter threshold
-
-    filter_threshold = compute_filter_threshold(final_Raccs_array, config)
-
     #_ = compute_best_threshold(final_Raccs_array, config)
     # ---- Preprocess scalarization ----
-    utility = Utility(
+    esr_utility = Utility(
         kind=config.utility_kind,
         alpha=1 - config.fair_alpha
         )
@@ -362,10 +321,11 @@ def main():
     # ---- Replay Buffer ----
     buffer = ReplayBuffer(
         device=config.device,
-        utility=utility,
+        utility=esr_utility,
         horizon=config.horizon,
         keep_dims=keep_dims,
-        reward_dim=config.reward_dim
+        reward_dim=config.reward_dim,
+        use_augmentation=config.use_augmentation
     )
     buffer.load_dataset(dataset)
     
@@ -374,28 +334,9 @@ def main():
     
     print("✅ Environment and agent initialized.")
     print("Config:", config)
-    
-    # ---- wandb logging ----
-    filter_name = f"{config.mode}_{config.utility_kind}_{config.f_divergence}"
-    filter_name += f"_fair_alpha{config.fair_alpha}"
-    filter_name += f"_filter{config.f_divergence_filter}"
-    filter_name += f"_seed{config.seed}"
-    tag_name = [config.tag] if isinstance(config.tag, str) else config.tag
-    
-    save_dir = os.path.join(config.save_path, filter_name)
-    filter_path = os.path.join(save_dir, "satisficing_filter.pth")
-
-    model_name = f"{config.mode}_{config.utility_kind}_{config.f_divergence}"
-    model_name += f"_fair_alpha{config.fair_alpha}"
-    model_name += f"_filter{config.f_divergence_filter}"
-    model_name += f"_budget{config.f_divergence_threshold}"
-    model_name += f"_seed{config.seed}"
-
-    save_model_dir = os.path.join(config.save_path, model_name)
-    model_path = os.path.join(save_model_dir, "model.pth")
 
     def trainer(agent, buffer, num_steps=10000, batch_size=256, log_interval=100):
-        # stats_history = []
+    # stats_history = []
 
         for step in range(1, num_steps + 1):
             batch = buffer.sample(batch_size)
@@ -424,7 +365,7 @@ def main():
                         "eval/scalarized_expected_return_piecewise_log": eval_results["scalarized_expected_return_piecewise_log"],
                         "eval/primary_objective": eval_results["primary_objective"],
                     }, step=step)
-    
+
                     # log the individual dimensions of the expected return vector
                     expected_return_vector = eval_results["expected_return_vector"]
                     return_vector_log_data = {
@@ -432,22 +373,27 @@ def main():
                         for i, val in enumerate(expected_return_vector)
                     }
                     wandb.log(return_vector_log_data, step=step)
-                
-                # print(" Train stats:", stats)
-                # print(" Eval stats:", eval_results)
 
-            # stats_history.append(stats)
-    
-    filter_test = False
+    # ---- wandb logging ----
+
+    model_name = f"Postfilter_fair_alpha{config.fair_alpha}"
+    model_name += f"_filter{config.lambda_1}"
+    model_name += f"_budget{config.lambda_2}"
+    model_name += f"_seed{config.seed}"
+    tag_name = [config.tag] if isinstance(config.tag, str) else config.tag
+
+    save_model_dir = os.path.join(config.save_path, model_name)
+    model_path = os.path.join(save_model_dir, "model.pth")
     if config.use_wandb:
             wandb.init(
-                project=config.wandb_project + "_ESR_filter",
+                project=config.wandb_project,
                 config=vars(config),
                 name=model_name,
                 entity = 'wsk208',
                 tags = tag_name
             )
-    agent = FiniteAET_filter(config = config, filter_threshold = filter_threshold, device=config.device)
+
+    agent = FiniteAET_double(config = config, device=config.device)
     trainer(
         agent,
         buffer,
@@ -455,67 +401,10 @@ def main():
         batch_size= config.batch_size,
         log_interval=config.log_interval
         )
-    os.makedirs(save_dir, exist_ok=True)
-    agent.save(filter_path)
-    print(f"💾 필터 저장 완료: {filter_path}")
-    '''
-    if config.mode == "ESR_filter":
-        print("FairDICE test")
-        if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project + "_ESR_filter",
-                config=vars(config),
-                name=model_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-        print("진입 확인!")
-        agent = ESRDICE(config, device=config.device)
-        trainer(
-            agent,
-            buffer,
-            num_steps= config.num_steps,
-            batch_size= config.batch_size,
-            log_interval=config.log_interval
-            )
-        os.makedirs(save_dir, exist_ok=True)
-        agent.save(filter_path)
-        print(f"💾 필터 저장 완료: {filter_path}")
+    os.makedirs(save_model_dir, exist_ok=True)
+    agent.save(model_path)
+    print(f"💾 모델 저장 완료: {model_path}")
     
-    if os.path.exists(filter_path) and not filter_test:
-        print(f"✅ 기존에 학습된 필터를 발견했습니다: {filter_path}")
-        print("Begin!")
-        if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project + "_ESR_model",
-                config=vars(config),
-                name=model_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-        print("진입 확인!")
-        agent = ESRDICE_after(config, filter_path, device=config.device)
-        trainer(
-            agent,
-            buffer,
-            num_steps= config.num_steps,
-            batch_size= config.batch_size,
-            log_interval=config.log_interval
-            )
-        os.makedirs(save_model_dir, exist_ok=True)
-        agent.save(model_path)
-        print(f"💾 모델 저장 완료: {filter_path}")
-    else:
-        print("기존에 학습된 필터가 없습니다 필터 학습을 진행합니다.")
-        if config.use_wandb:
-            wandb.init(
-                project=config.wandb_project,
-                config=vars(config),
-                name=filter_name,
-                entity = 'wsk208',
-                tags = tag_name
-            )
-    '''    
     if config.use_wandb:
         wandb.finish()
 

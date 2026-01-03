@@ -141,6 +141,26 @@ class FiniteAET_double(nn.Module):
 
     def train(self, batch):
         return self.train_step(batch)
+
+    def _update_lambda(self, div_mean:torch.Tensor):
+        if self.config.use_fixed_lambda:
+            return  # do not update lambda if using fixed lambda
+        
+        update_amount = div_mean - self.f_div_threshold
+        print("Divergence mean:", div_mean.item(), " Update amount:", update_amount.item())
+        new_lambda = self.lambda_f_div + self.lambda_lr * update_amount
+
+        new_lambda = torch.clamp(new_lambda, min=1e-5, max=1e3)
+        print("Updated lambda_f_div:", new_lambda.item())
+        self.lambda_f_div.copy_(new_lambda)
+        
+    def get_lambda(self):
+        """Helper to get current lambda value"""
+        if self.config.use_fixed_lambda:
+            return self.lambda_f_div
+        else:
+            # Compute from log_lambda_f_div, ensuring it's positive
+            return torch.exp(self.log_lambda_f_div)
     
     @staticmethod
     def masked_mean(x, mask, eps=1e-8):
@@ -150,10 +170,60 @@ class FiniteAET_double(nn.Module):
         den = m.sum().clamp_min(eps)
         return (x * m).sum() / den
     
+    @staticmethod
+    def ess_from_w(w: torch.Tensor, eps: float = 1e-12):
+        """
+        w: nonnegative weights tensor (any shape)
+        returns: ess (float), ess_ratio (float), stats(dict)
+        """
+        w = w.detach().reshape(-1).to(torch.float64)
+        w = torch.clamp(w, min=0.0)
+
+        N = w.numel()
+        if N == 0:
+            raise ValueError("Empty w.")
+
+        sum_w = w.sum()
+        sum_w2 = (w * w).sum().clamp_min(eps)
+
+        if sum_w.item() <= eps:
+            ess = torch.tensor(0.0, dtype=torch.float64, device=w.device)
+            ess_ratio = torch.tensor(0.0, dtype=torch.float64, device=w.device)
+        else:
+            ess = (sum_w * sum_w) / sum_w2
+            ess_ratio = ess / float(N)
+
+        stats = {
+            "N": N,
+            "sum_w": sum_w.item(),
+            "mean_w": (sum_w / float(N)).item(),
+            "w_max": w.max().item(),
+        }
+        return ess.item(), ess_ratio.item(), stats
+    @staticmethod
+    def ess_from_w_masked(w: torch.Tensor, mask: torch.Tensor, eps: float = 1e-12):
+        w = w.detach().to(torch.float64)
+        w = torch.clamp(w, min=0.0)
+
+        m = mask.to(dtype=torch.bool)
+        w = w[m].reshape(-1)
+
+        N = w.numel()
+        if N == 0:
+            return 0.0, 0.0, {"N": 0}
+
+        sum_w = w.sum()
+        sum_w2 = (w * w).sum().clamp_min(eps)
+
+        if sum_w.item() <= eps:
+            ess, ess_ratio = 0.0, 0.0
+        else:
+            ess = ((sum_w * sum_w) / sum_w2).item()
+            ess_ratio = ess / float(N)
+
+        return ess, ess_ratio, {"N": N, "w_max": w.max().item(), "mean_w": (sum_w/float(N)).item()}
     # Loss functions
     def nu_loss_fn(self, states, next_states, timesteps, next_timesteps, rewards, initial_states):
-        lambda_f_div = self.lambda_1
-
         nu_curr = self.nu_1(states)
         nu_next = self.nu_1(next_states)
         nu_t   = nu_curr[:, :-1]
@@ -165,9 +235,13 @@ class FiniteAET_double(nn.Module):
         e_nonflat      = scalar[:, None] + nu_tp1 - nu_t    # [B]
         e = e_nonflat.reshape(-1)
 
+        lambda_f_div = self.get_lambda()
+
         # w = (f')^{-1}(e/λ); w >= 0
         state_action_ratio = f_derivative_inverse(e / lambda_f_div, self.f_div)
         state_action_ratio = torch.nn.functional.relu(state_action_ratio)
+
+        _, ess_1, _ = self.ess_from_w(state_action_ratio)
 
         # f(w)
         f_vals = f(state_action_ratio, self.f_div)
@@ -182,11 +256,13 @@ class FiniteAET_double(nn.Module):
         else:
             loss_3 = piecewise_frac_u_star_neg_mu(mu_1, self.config.fair_alpha).sum()
 
+        # gradient penalty for ν
+        gp_coeff = getattr(self.config, "nu_grad_penalty_coeff", 0.0)
+        nu_grad_penalty = 0.0
+
         with torch.no_grad():
             tau = getattr(self.config, "mask_threshold", 0.0)
             mask = (state_action_ratio > tau) 
-
-        lambda_f_div = self.lambda_2
 
         nu_curr_2 = self.nu_2(states)
         nu_next_2 = self.nu_2(next_states)
@@ -201,6 +277,8 @@ class FiniteAET_double(nn.Module):
         state_action_ratio_2 = f_derivative_inverse(e_2 / lambda_f_div, self.f_div)
         state_action_ratio_2 = torch.nn.functional.relu(state_action_ratio_2)
 
+        _, ess_2, _ = self.ess_from_w_masked(state_action_ratio_2, mask)
+
         f_vals_2 = f(state_action_ratio_2, self.f_div)
 
         loss_1_2 = init_nu_2.mean()
@@ -212,10 +290,10 @@ class FiniteAET_double(nn.Module):
         else:
             loss_3_2 = piecewise_frac_u_star_neg_mu(mu_2, self.config.fair_alpha).sum()
 
-        nu_loss = loss_1 + loss_2 + loss_3
+        nu_loss = loss_1 + loss_2 + loss_3 + gp_coeff * nu_grad_penalty
         nu_loss = nu_loss + loss_1_2 + loss_2_2 + loss_3_2
 
-        return nu_loss, (e, loss_1, loss_2, loss_3, nu_t.mean(), nu_tp1.mean(), f_vals.mean().detach())
+        return nu_loss, (e, nu_grad_penalty, loss_1, loss_2, loss_3, nu_t.mean(), nu_tp1.mean(), f_vals.mean().detach(),ess_1,ess_2)
 
 
     def policy_loss_fn(self, states, actions, rewards, next_states):
@@ -224,7 +302,6 @@ class FiniteAET_double(nn.Module):
         idx = actions.view(-1, 1, 1).expand(-1, logp_all.size(1), 1)
         log_probs = torch.gather(logp_all, dim=-1, index=idx).squeeze(-1) # [B,H]
 
-        lambda_f_div_1 = self.lambda_1
         nu_curr_1 = self.nu_1(states)       # [B, H+1]
         nu_next_1 = self.nu_1(next_states)  # [B, H+1]
         nu_t_1   = nu_curr_1[:, :-1]        # [B, H]
@@ -234,14 +311,14 @@ class FiniteAET_double(nn.Module):
         r_scalar_1 = rewards @ mu_1 # [B, H]
         e_1 = r_scalar_1[:, None] + nu_tp1_1 - nu_t_1
 
-        state_action_ratio_1 = f_derivative_inverse(e_1 / lambda_f_div_1, self.f_div)
+        lambda_f_div = self.get_lambda()
+
+        state_action_ratio_1 = f_derivative_inverse(e_1 / lambda_f_div, self.f_div)
         state_action_ratio_1 = torch.nn.functional.relu(state_action_ratio_1)
         with torch.no_grad():
             tau = getattr(self.config, "mask_threshold", 0.0)
-            mask = (state_action_ratio_1 > tau)
+            mask = (state_action_ratio_1 > tau) 
 
-        
-        lambda_f_div_2 = self.lambda_2
         nu_curr_2 = self.nu_2(states)
         nu_next_2 = self.nu_2(next_states)
         nu_t_2   = nu_curr_2[:, :-1]
@@ -251,7 +328,7 @@ class FiniteAET_double(nn.Module):
         r_scalar_2 = (rewards @ mu_2)
         e_2      = r_scalar_2[:, None] + nu_tp1_2 - nu_t_2    # [B]
         
-        state_action_ratio_2 = f_derivative_inverse(e_2 / lambda_f_div_2, self.f_div)
+        state_action_ratio_2 = f_derivative_inverse(e_2 / lambda_f_div, self.f_div)
         state_action_ratio_2 = torch.nn.functional.relu(state_action_ratio_2)
         w = state_action_ratio_2.detach()
 
@@ -276,8 +353,8 @@ class FiniteAET_double(nn.Module):
         if self.mu_optim is not None:
             self.mu_optim.zero_grad()
 
-        nu_loss, (e, init_loss, advantage_loss, util_loss,
-                  nu_vals_mean, next_nu_mean, f_vals_mean) = self.nu_loss_fn(
+        nu_loss, (e, nu_grad_penalty, init_loss, advantage_loss, util_loss,
+                  nu_vals_mean, next_nu_mean, f_vals_mean, ess_1, ess_2) = self.nu_loss_fn(
             states, next_states, timesteps, next_timesteps, rewards, initial_states
         )
         nu_loss.backward()
@@ -285,6 +362,16 @@ class FiniteAET_double(nn.Module):
         if self.mu_optim is not None:
             self.mu_optim.step()
         self.nu_scheduler.step()
+
+        # Update λ (f-divergence constraint)
+        # self._update_lambda(f_vals_mean)
+        if not self.config.use_fixed_lambda:
+            current_lambda_f_div = self.get_lambda()
+            lambda_loss = current_lambda_f_div * (self.f_div_threshold - f_vals_mean.detach())
+            self.lambda_optim.zero_grad()
+            lambda_loss.backward()
+            self.lambda_optim.step()
+            self.lambda_scheduler.step()
 
         # Update policy
         self.policy_optim.zero_grad()
@@ -309,12 +396,19 @@ class FiniteAET_double(nn.Module):
             "e_std": float(e.std().item()),
             "e_min": float(e.min().item()),
             "e_max": float(e.max().item()),
+            "nu_grad_penalty": float(nu_grad_penalty.item()) if isinstance(nu_grad_penalty, torch.Tensor) else 0.0,
             "init_loss": float(init_loss.item()),
             "advantage_loss": float(advantage_loss.item()),
             "util_loss": float(util_loss.item()),
             "nu_vals_mean": float(nu_vals_mean.item()),
             "next_nu_mean": float(next_nu_mean.item()),
             "f_vals_mean": float(f_vals_mean.item()),
+            # "lambda_f_div": float(self.lambda_f_div.detach().item()),
+            "lambda_f_div": float(self.get_lambda().detach().item()),
+            "ess_1": float(ess_1) ,
+            "ess_2": float(ess_2),
+            #"mu_0": float(self.mu().detach()[0].item()),
+            #"mu_1": float(self.mu().detach()[1].item()),
         }
 
     # Save / Load
