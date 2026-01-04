@@ -220,7 +220,7 @@ def main():
         default="linear",
         choices=["zscore", "minmax", "linear", "none"],
     )
-    parser.add_argument("--use_augmentation", type=bool, default=True)
+    parser.add_argument("--use_augmentation", type=bool, default=False)
 
     # ---- logging ----
     parser.add_argument("--use_wandb", type=bool, default=False)
